@@ -1,16 +1,7 @@
 classdef (Sealed) ClassKeysightSupply < handle
-    %CLASSKEYSIGHTSUPPLY Singleton wrapper for Keysight DC power supplies
-    %
-    %   Usage (example):
-    %       ps = ClassKeysightSupply.getInstance();
-    %       ps.connect('TriplePowerSupply');
-    %       ps.setVoltage(5.0, 1);
-    %       ps.setCurrent(0.2, 1);
-    %       ps.powerOn(1);
-    %
-    %   Remember to call:
-    %       ps.disconnect();
-    %   when you are done.
+    % ClassKeysightSupply
+    %   Singleton wrapper to control Keysight single- and triple-output
+    %   power supplies using VISA / SCPI commands.
 
     properties (Dependent = true)
         MaxVoltage_SinglePowerSupply
@@ -19,32 +10,34 @@ classdef (Sealed) ClassKeysightSupply < handle
     end
 
     properties (Access = private)
-        PossibleNames = {'SinglePowerSupply', 'TriplePowerSupply'};
+        PossibleNames = {'SinglePowerSupply', 'TriplePowerSupply'}
 
-        % VISA resource strings for the instruments
+        % Power Supply USB Addresses (readable from the instrument)
         viRscNameSingle = 'USB0::10893::5634::MY61002609::0::INSTR'; % Single-output supply
         viRscNameTriple = 'USB0::10893::4354::MY61007414::0::INSTR'; % Triple-output supply
 
-        InstrObj            % VISA object handle
+        InstrObj            % VISA object
         CurrentSupplyName   % 'SinglePowerSupply' or 'TriplePowerSupply'
 
-        % Internal storage for dependent properties
-        MaxVoltage_SinglePowerSupply_Private = 60;  % <-- set to your actual instrument limit
-        MaxVoltage_TriplePowerSupply_Private = 30;  % <-- set to your actual instrument limit
+        MaxVoltage_SinglePowerSupply_Private
+        MaxVoltage_TriplePowerSupply_Private
 
-        VoltageResolutionPrivate = 0.01; % V resolution
-        UploadTimeOut = 20;              % s, VISA timeout
+        VoltageResolutionPrivate = 0.01;
+        UploadTimeOut = 20; % Timeout (s) for VISA operations
     end
 
     methods (Access = private)
         function obj = ClassKeysightSupply()
-            % Private constructor for singleton pattern
+            % Private constructor for singleton pattern.
+            % If desired, initialize hardware-specific limits here, e.g.:
+            % obj.MaxVoltage_SinglePowerSupply_Private  = 30;
+            % obj.MaxVoltage_TriplePowerSupply_Private = 30;
         end
     end
 
     methods (Static)
         function obj = getInstance()
-            %GETINSTANCE Return the singleton instance
+            %GETINSTANCE Return the singleton instance of ClassKeysightSupply.
             persistent localObj
             if isempty(localObj) || ~isvalid(localObj)
                 localObj = ClassKeysightSupply;
@@ -53,30 +46,36 @@ classdef (Sealed) ClassKeysightSupply < handle
         end
     end
 
-    %% Connection methods
     methods
-        % Connect to the power supply
+        % -----------------------------
+        % Connection handling
+        % -----------------------------
+
         function connect(obj, SupplyName)
-            %CONNECT Open a VISA connection to the selected Keysight supply
+            % CONNECT Open a VISA connection to the selected Keysight supply.
             %
-            %   SupplyName must be one of:
-            %       'SinglePowerSupply' or 'TriplePowerSupply'.
+            %   obj.connect('SinglePowerSupply')
+            %   obj.connect('TriplePowerSupply')
 
             obj.CurrentSupplyName = SupplyName;
             viRscName = obj.selectResource(SupplyName);
 
-            % Check if InstrObj is already connected to prevent reconnection
+            % Create or reuse VISA object
             if isempty(obj.InstrObj) || ~isvalid(obj.InstrObj)
                 % Create a VISA object with the appropriate vendor and resource
                 obj.InstrObj = visa('keysight', viRscName);
                 obj.InstrObj.Timeout = obj.UploadTimeOut;
             else
-                error('Instrument already connected. Resource: %s. Disconnect before reconnecting.', viRscName);
+                % If object exists and is already open, prevent reconnect
+                if strcmp(obj.InstrObj.Status, 'open')
+                    error('Instrument already connected. Disconnect before calling connect again.');
+                end
+                % If it exists but is closed, we will reopen it below.
             end
 
             % Try to open the connection
             try
-                fopen(obj.InstrObj);  % Open the VISA connection
+                fopen(obj.InstrObj);  % Open (or reopen) the VISA connection
 
                 % Verify the connection by querying the instrument ID
                 fprintf(obj.InstrObj, '*IDN?');  % Send ID query
@@ -89,7 +88,8 @@ classdef (Sealed) ClassKeysightSupply < handle
         end
 
         function disconnect(obj)
-            %DISCONNECT Close the VISA connection to the instrument
+            % DISCONNECT Close the VISA connection and clean up.
+
             try
                 if ~isempty(obj.InstrObj) && strcmp(obj.InstrObj.Status, 'open')
                     fclose(obj.InstrObj);
@@ -99,14 +99,18 @@ classdef (Sealed) ClassKeysightSupply < handle
                 else
                     fprintf('No active connection found to close.\n');
                 end
+
             catch ME
                 error('Failed to disconnect from the instrument: %s', ME.message);
             end
         end
     end
 
-    %% Dependent property getters
     methods
+        % -----------------------------
+        % Dependent property getters
+        % -----------------------------
+
         function MaxVoltage_SinglePowerSupply = get.MaxVoltage_SinglePowerSupply(obj)
             MaxVoltage_SinglePowerSupply = obj.MaxVoltage_SinglePowerSupply_Private;
         end
@@ -118,21 +122,21 @@ classdef (Sealed) ClassKeysightSupply < handle
         function VoltageResolution = get.VoltageResolution(obj)
             VoltageResolution = obj.VoltageResolutionPrivate;
         end
-    end
 
-    %% SCPI high-level methods: Set & Read
-    methods
+        % -----------------------------
+        % Set / Read Voltage & Current
+        % -----------------------------
+
         function setVoltage(obj, voltage, channel)
-            %SETVOLTAGE Set output voltage.
-            %
-            %   For SinglePowerSupply:
-            %       setVoltage(obj, voltage)
-            %
-            %   For TriplePowerSupply:
-            %       setVoltage(obj, voltage, channel)  % channel = 1, 2, or 3
-
-            if nargin < 3
-                channel = []; % Not needed for single-output supply
+            % Handle optional channel argument
+            if strcmp(obj.CurrentSupplyName, 'SinglePowerSupply')
+                if nargin < 3
+                    channel = []; % Not used for single supply
+                end
+            else
+                if nargin < 3
+                    error('Channel must be specified for TriplePowerSupply.');
+                end
             end
 
             try
@@ -140,24 +144,13 @@ classdef (Sealed) ClassKeysightSupply < handle
                     error('The connection to the power supply is not open.');
                 end
 
-                % Optional: simple safety check against max voltage
-                switch obj.CurrentSupplyName
-                    case 'SinglePowerSupply'
-                        vmax = obj.MaxVoltage_SinglePowerSupply_Private;
-                    case 'TriplePowerSupply'
-                        vmax = obj.MaxVoltage_TriplePowerSupply_Private;
-                    otherwise
-                        vmax = Inf;
-                end
-                if ~isempty(vmax) && isfinite(vmax) && voltage > vmax
-                    error('Requested voltage (%.2f V) exceeds max limit (%.2f V).', voltage, vmax);
-                end
-
+                % Construct the command with the "set" command type
                 cmd = obj.constructCommand('VOLT', voltage, channel, 'set');
                 fprintf(obj.InstrObj, cmd);  % Send the command
 
                 if strcmp(obj.CurrentSupplyName, 'TriplePowerSupply')
-                    fprintf('[%s] Voltage set to %.2f V on Channel %d\n', obj.CurrentSupplyName, voltage, channel);
+                    fprintf('[%s] Voltage set to %.2f V on Channel %d\n', ...
+                        obj.CurrentSupplyName, voltage, channel);
                 else
                     fprintf('[%s] Voltage set to %.2f V\n', obj.CurrentSupplyName, voltage);
                 end
@@ -167,16 +160,15 @@ classdef (Sealed) ClassKeysightSupply < handle
         end
 
         function setCurrent(obj, current, channel)
-            %SETCURRENT Set output current limit.
-            %
-            %   For SinglePowerSupply:
-            %       setCurrent(obj, current)
-            %
-            %   For TriplePowerSupply:
-            %       setCurrent(obj, current, channel)  % channel = 1, 2, or 3
-
-            if nargin < 3
-                channel = [];
+            % Handle optional channel argument
+            if strcmp(obj.CurrentSupplyName, 'SinglePowerSupply')
+                if nargin < 3
+                    channel = []; % Not used for single supply
+                end
+            else
+                if nargin < 3
+                    error('Channel must be specified for TriplePowerSupply.');
+                end
             end
 
             try
@@ -184,13 +176,15 @@ classdef (Sealed) ClassKeysightSupply < handle
                     error('The connection to the power supply is not open.');
                 end
 
+                % Construct the command with the "set" command type
                 cmd = obj.constructCommand('CURR', current, channel, 'set');
                 fprintf(obj.InstrObj, cmd);  % Send the command
 
                 if strcmp(obj.CurrentSupplyName, 'TriplePowerSupply')
-                    fprintf('[%s] Current set to %.3f A on Channel %d\n', obj.CurrentSupplyName, current, channel);
+                    fprintf('[%s] Current set to %.2f A on Channel %d\n', ...
+                        obj.CurrentSupplyName, current, channel);
                 else
-                    fprintf('[%s] Current set to %.3f A\n', obj.CurrentSupplyName, current);
+                    fprintf('[%s] Current set to %.2f A\n', obj.CurrentSupplyName, current);
                 end
             catch ME
                 error('Failed to set the current: %s', ME.message);
@@ -198,13 +192,15 @@ classdef (Sealed) ClassKeysightSupply < handle
         end
 
         function voltage = readVoltage(obj, channel)
-            %READVOLTAGE Measure output voltage.
-            %
-            %   v = readVoltage(obj)           % single-output
-            %   v = readVoltage(obj, channel)  % triple-output
-
-            if nargin < 2
-                channel = [];
+            % Handle optional channel argument
+            if strcmp(obj.CurrentSupplyName, 'SinglePowerSupply')
+                if nargin < 2
+                    channel = []; % Not used for single supply
+                end
+            else
+                if nargin < 2
+                    error('Channel must be specified for TriplePowerSupply.');
+                end
             end
 
             try
@@ -212,6 +208,7 @@ classdef (Sealed) ClassKeysightSupply < handle
                     error('The connection to the power supply is not open.');
                 end
 
+                % Construct the command with the "read" command type
                 cmd = obj.constructCommand('MEAS:VOLT?', [], channel, 'read');
                 fprintf(obj.InstrObj, cmd);  % Send the command
 
@@ -219,7 +216,8 @@ classdef (Sealed) ClassKeysightSupply < handle
                 voltage = str2double(voltageStr);
 
                 if strcmp(obj.CurrentSupplyName, 'TriplePowerSupply')
-                    fprintf('[%s] Voltage on Channel %d: %.3f V\n', obj.CurrentSupplyName, channel, voltage);
+                    fprintf('[%s] Voltage on Channel %d: %.3f V\n', ...
+                        obj.CurrentSupplyName, channel, voltage);
                 else
                     fprintf('[%s] Voltage: %.3f V\n', obj.CurrentSupplyName, voltage);
                 end
@@ -229,13 +227,15 @@ classdef (Sealed) ClassKeysightSupply < handle
         end
 
         function current = readCurrent(obj, channel)
-            %READCURRENT Measure output current.
-            %
-            %   i = readCurrent(obj)           % single-output
-            %   i = readCurrent(obj, channel)  % triple-output
-
-            if nargin < 2
-                channel = [];
+            % Handle optional channel argument
+            if strcmp(obj.CurrentSupplyName, 'SinglePowerSupply')
+                if nargin < 2
+                    channel = []; % Not used for single supply
+                end
+            else
+                if nargin < 2
+                    error('Channel must be specified for TriplePowerSupply.');
+                end
             end
 
             try
@@ -243,6 +243,7 @@ classdef (Sealed) ClassKeysightSupply < handle
                     error('The connection to the power supply is not open.');
                 end
 
+                % Construct the command with the "read" command type
                 cmd = obj.constructCommand('MEAS:CURR?', [], channel, 'read');
                 fprintf(obj.InstrObj, cmd);  % Send the command
 
@@ -250,26 +251,30 @@ classdef (Sealed) ClassKeysightSupply < handle
                 current = str2double(currentStr);
 
                 if strcmp(obj.CurrentSupplyName, 'TriplePowerSupply')
-                    fprintf('[%s] Current on Channel %d: %.6f A\n', obj.CurrentSupplyName, channel, current);
+                    fprintf('[%s] Current on Channel %d: %.3f A\n', ...
+                        obj.CurrentSupplyName, channel, current);
                 else
-                    fprintf('[%s] Current: %.6f A\n', obj.CurrentSupplyName, current);
+                    fprintf('[%s] Current: %.3f A\n', obj.CurrentSupplyName, current);
                 end
             catch ME
                 error('Failed to read the current: %s', ME.message);
             end
         end
-    end
 
-    %% Power ON/OFF
-    methods
+        % -----------------------------
+        % Output ON / OFF
+        % -----------------------------
+
         function powerOn(obj, channel)
-            %POWERON Enable output(s).
-            %
-            %   powerOn(obj)           % single-output
-            %   powerOn(obj, channel)  % triple-output
-
-            if nargin < 2
-                channel = [];
+            % Handle optional channel argument
+            if strcmp(obj.CurrentSupplyName, 'SinglePowerSupply')
+                if nargin < 2
+                    channel = []; % Not used for single supply
+                end
+            else
+                if nargin < 2
+                    error('Channel must be specified for TriplePowerSupply.');
+                end
             end
 
             try
@@ -277,11 +282,13 @@ classdef (Sealed) ClassKeysightSupply < handle
                     error('The connection to the power supply is not open.');
                 end
 
+                % Construct the command with the "power" command type
                 cmd = obj.constructCommand('OUTP ON', [], channel, 'power');
                 fprintf(obj.InstrObj, cmd);  % Send the command
 
                 if strcmp(obj.CurrentSupplyName, 'TriplePowerSupply')
-                    fprintf('[%s] Power turned ON for Channel %d\n', obj.CurrentSupplyName, channel);
+                    fprintf('[%s] Power turned ON for Channel %d\n', ...
+                        obj.CurrentSupplyName, channel);
                 else
                     fprintf('[%s] Power turned ON\n', obj.CurrentSupplyName);
                 end
@@ -291,13 +298,15 @@ classdef (Sealed) ClassKeysightSupply < handle
         end
 
         function powerOff(obj, channel)
-            %POWEROFF Disable output(s).
-            %
-            %   powerOff(obj)           % single-output
-            %   powerOff(obj, channel)  % triple-output
-
-            if nargin < 2
-                channel = [];
+            % Handle optional channel argument
+            if strcmp(obj.CurrentSupplyName, 'SinglePowerSupply')
+                if nargin < 2
+                    channel = []; % Not used for single supply
+                end
+            else
+                if nargin < 2
+                    error('Channel must be specified for TriplePowerSupply.');
+                end
             end
 
             try
@@ -305,11 +314,13 @@ classdef (Sealed) ClassKeysightSupply < handle
                     error('The connection to the power supply is not open.');
                 end
 
+                % Construct the command with the "power" command type
                 cmd = obj.constructCommand('OUTP OFF', [], channel, 'power');
                 fprintf(obj.InstrObj, cmd);  % Send the command
 
                 if strcmp(obj.CurrentSupplyName, 'TriplePowerSupply')
-                    fprintf('[%s] Power turned OFF for Channel %d\n', obj.CurrentSupplyName, channel);
+                    fprintf('[%s] Power turned OFF for Channel %d\n', ...
+                        obj.CurrentSupplyName, channel);
                 else
                     fprintf('[%s] Power turned OFF\n', obj.CurrentSupplyName);
                 end
@@ -317,18 +328,20 @@ classdef (Sealed) ClassKeysightSupply < handle
                 error('Failed to power off: %s', ME.message);
             end
         end
-    end
 
-    %% Low-level SCPI construction + resource selection
-    methods
+        % -----------------------------
+        % Internal helpers
+        % -----------------------------
+
         function cmd = constructCommand(obj, baseCmd, value, channel, commandType)
-            %CONSTRUCTCOMMAND Build SCPI command string.
+            % Helper function to construct SCPI commands with proper
+            % channel handling for single vs triple supply.
 
             if nargin < 5
                 error('Command type must be specified as "read", "power", or "set".');
             end
 
-            % Validate channel number for TriplePowerSupply
+            % Validate channel number for TriplePowerSupply only
             if strcmp(obj.CurrentSupplyName, 'TriplePowerSupply')
                 if isempty(channel) || ~ismember(channel, [1, 2, 3])
                     error('Invalid channel number. Valid channels are 1, 2, or 3.');
@@ -338,23 +351,29 @@ classdef (Sealed) ClassKeysightSupply < handle
             switch commandType
                 case 'read'
                     if strcmp(obj.CurrentSupplyName, 'SinglePowerSupply')
-                        cmd = baseCmd;  % Example: "MEAS:VOLT?"
+                        % Example: "MEAS:VOLT?"
+                        cmd = baseCmd;
                     else
-                        cmd = sprintf('%s (@%d)', baseCmd, channel);  % "MEAS:VOLT? (@2)"
+                        % Example: "MEAS:VOLT? (@2)"
+                        cmd = sprintf('%s (@%d)', baseCmd, channel);
                     end
 
                 case 'set'
                     if strcmp(obj.CurrentSupplyName, 'SinglePowerSupply')
-                        cmd = sprintf('%s %.3f', baseCmd, value);  % "VOLT 5.000"
+                        % Example: "VOLT 5.00"
+                        cmd = sprintf('%s %.2f', baseCmd, value);
                     else
-                        cmd = sprintf('%s %.3f, (@%d)', baseCmd, value, channel);  % "VOLT 12.000, (@2)"
+                        % Example: "VOLT 12.00, (@2)"
+                        cmd = sprintf('%s %.2f, (@%d)', baseCmd, value, channel);
                     end
 
                 case 'power'
                     if strcmp(obj.CurrentSupplyName, 'SinglePowerSupply')
-                        cmd = sprintf('%s', baseCmd);  % "OUTP ON"
+                        % Example: "OUTP ON"
+                        cmd = sprintf('%s', baseCmd);
                     else
-                        cmd = sprintf('%s, (@%d)', baseCmd, channel);  % "OUTP ON, (@2)"
+                        % Example: "OUTP ON, (@2)"
+                        cmd = sprintf('%s, (@%d)', baseCmd, channel);
                     end
 
                 otherwise
@@ -363,16 +382,19 @@ classdef (Sealed) ClassKeysightSupply < handle
         end
 
         function rscName = selectResource(obj, SupplyName)
-            %SELECTRESOURCE Return VISA resource string for given supply name.
+            % SELECTRESOURCE Select the appropriate VISA resource string.
 
+            % Define valid supply names
             validNames = obj.PossibleNames;
 
+            % Check if the provided supply name is valid
             if ~ismember(SupplyName, validNames)
                 errorMessage = sprintf('Invalid power supply name. Valid names are: %s', ...
                     strjoin(validNames, ', '));
                 error(errorMessage);
             end
 
+            % Select the appropriate resource string based on the valid supply name
             switch SupplyName
                 case 'SinglePowerSupply'
                     rscName = obj.viRscNameSingle;
