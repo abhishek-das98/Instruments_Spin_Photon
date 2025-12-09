@@ -31,6 +31,7 @@ stepPause       = 0.25;                 % Pause (s) between voltage updates
 % Power meter configuration
 pmDwellSeconds      = 5;   % Total time to dwell at each sweep point
 pmSampleIntervalSec = 1;   % Interval between power samples (seconds)
+pmWavelengthNm      = 930; % Wavelength (nm) to configure on the power meter
 
 %% ---------------------------- AWG set up --------------------------------
 AWG = ClassAWG.getInstance();
@@ -65,6 +66,8 @@ pause(1); % allow the connection to stabilize
 PM = ClassThorlabsPM100D.getInstance();
 PM.connect();
 pause(1); % allow the connection to stabilize
+PM.SetWavelength(pmWavelengthNm);
+
 
 % Turn on both outputs that will be swept
 PS.powerOn(psChannel1);
@@ -74,68 +77,73 @@ PS.powerOn(psChannel2);
 ch1Sweep = unique([0:psStepCh1:psMaxVoltageCh1, psMaxVoltageCh1]);
 ch2Sweep = unique([0:psStepCh2:psMaxVoltageCh2, psMaxVoltageCh2]);
 
-maxSteps = max(numel(ch1Sweep), numel(ch2Sweep));
-
 numAvgSamples = max(1, floor(pmDwellSeconds / pmSampleIntervalSec));
-avgPowerLog   = nan(1, maxSteps);
-voltageLogCh1 = nan(1, maxSteps);
-voltageLogCh2 = nan(1, maxSteps);
+avgPowerGrid  = nan(numel(ch2Sweep), numel(ch1Sweep));
+voltageLogCh1 = nan(numel(ch2Sweep), numel(ch1Sweep));
+voltageLogCh2 = nan(numel(ch2Sweep), numel(ch1Sweep));
 
-fprintf('Starting voltage sweeps on power supply channels %d and %d...\n', ...
-    psChannel1, psChannel2);
+totalSteps = numel(ch2Sweep) * numel(ch1Sweep);
 
-for idx = 1:maxSteps
-    if idx <= numel(ch1Sweep)
-        v1 = ch1Sweep(idx);
-    else
-        v1 = ch1Sweep(end);
-    end
-    PS.setVoltage(v1, psChannel1);
-    fprintf('Requested Channel %d voltage: %.2f V\n', psChannel1, v1);
-    voltageLogCh1(idx) = v1;
+fprintf(['Starting nested sweeps: Channel %d (amplifying voltage) inside ', ...
+    'each Channel %d bias voltage level...\n'], psChannel1, psChannel2);
 
-    if idx <= numel(ch2Sweep)
-        v2 = ch2Sweep(idx);
-    else
-        v2 = ch2Sweep(end);
-    end
+stepCounter = 0;
+for biasIdx = 1:numel(ch2Sweep)
+    v2 = ch2Sweep(biasIdx);
     PS.setVoltage(v2, psChannel2);
-    fprintf('Requested Channel %d voltage: %.2f V\n', psChannel2, v2);
-    voltageLogCh2(idx) = v2;
+    fprintf('Set Channel %d bias to %.2f V\n', psChannel2, v2);
 
-    % Allow supply to settle before measuring power
-    pause(stepPause);
+    for ampIdx = 1:numel(ch1Sweep)
+        v1 = ch1Sweep(ampIdx);
+        PS.setVoltage(v1, psChannel1);
+        fprintf('  Set Channel %d amplifying voltage to %.2f V\n', psChannel1, v1);
 
-    powerSamples = zeros(1, numAvgSamples);
-    for sampleIdx = 1:numAvgSamples
-        pause(pmSampleIntervalSec);
-        powerSamples(sampleIdx) = PM.GetPower();
-        fprintf('  Power sample %d/%d: %.6f W\n', sampleIdx, numAvgSamples, powerSamples(sampleIdx));
+        stepCounter = stepCounter + 1;
+        fprintf('  Sweep step %d/%d (bias index %d, amp index %d)\n', ...
+            stepCounter, totalSteps, biasIdx, ampIdx);
+
+        voltageLogCh1(biasIdx, ampIdx) = v1;
+        voltageLogCh2(biasIdx, ampIdx) = v2;
+
+        % Allow supply to settle before measuring power
+        pause(stepPause);
+
+        powerSamples = zeros(1, numAvgSamples);
+        for sampleIdx = 1:numAvgSamples
+            pause(pmSampleIntervalSec);
+            powerSamples(sampleIdx) = PM.GetPower();
+            fprintf('    Power sample %d/%d: %.6f W\n', sampleIdx, numAvgSamples, powerSamples(sampleIdx));
+        end
+
+        avgPower = mean(powerSamples);
+        avgPowerGrid(biasIdx, ampIdx) = avgPower;
+        fprintf('    Average power at Vbias=%.2f V, Vamp=%.2f V: %.6f W\n', ...
+            v2, v1, avgPower);
     end
-
-    avgPower = mean(powerSamples);
-    avgPowerLog(idx) = avgPower;
-    fprintf('  Average power at V1=%.2f V, V2=%.2f V: %.6f W\n', v1, v2, avgPower);
 end
 
 fprintf('Voltage sweeps complete.\n');
 
 % Report the maximum measured power and corresponding voltages
-[maxPower, maxIdx] = max(avgPowerLog);
-fprintf(['Maximum average power: %.6f W at step %d ', ...
-         '(Channel %d: %.2f V, Channel %d: %.2f V)\n'], ...
-        maxPower, maxIdx, psChannel1, voltageLogCh1(maxIdx), psChannel2, voltageLogCh2(maxIdx));
+[maxPower, maxLinearIdx] = max(avgPowerGrid(:));
+[maxBiasIdx, maxAmpIdx]  = ind2sub(size(avgPowerGrid), maxLinearIdx);
+fprintf(['Maximum average power: %.6f W at bias %.2f V (Channel %d), ', ...
+         'amplifying %.2f V (Channel %d)\n'], ...
+        maxPower, voltageLogCh2(maxBiasIdx, maxAmpIdx), psChannel2, ...
+        voltageLogCh1(maxBiasIdx, maxAmpIdx), psChannel1);
 
-% Plot power vs. sweep step for a quick visual overview
+% Plot a heatmap of power vs. amplifying and bias voltages
 figure;
-plot(1:maxSteps, avgPowerLog, '-o');
-xlabel('Sweep step');
-ylabel('Average power (W)');
-title('Power vs. sweep step');
-grid on;
+imagesc(ch1Sweep, ch2Sweep, avgPowerGrid);
+set(gca, 'YDir', 'normal');
+xlabel(sprintf('Channel %d amplifying voltage (V)', psChannel1));
+ylabel(sprintf('Channel %d bias voltage (V)', psChannel2));
+title('Average power across nested voltage sweeps');
+colorbar;
 hold on;
-plot(maxIdx, maxPower, 'r*', 'MarkerSize', 10);
-legend('Average power', 'Maximum');
+maxMarker = plot(voltageLogCh1(maxBiasIdx, maxAmpIdx), ...
+    voltageLogCh2(maxBiasIdx, maxAmpIdx), 'r*', 'MarkerSize', 10, 'LineWidth', 1.5);
+legend(maxMarker, 'Maximum power');
 
 % Stop AWG output and close connection
 AWG.stopAWG(awgChannel);
