@@ -1,12 +1,11 @@
 % -------------------------------------------------------------------------
-% AWGPowerSweepExample.m
+% FindingMaxOutPowerSweepVoltage.m
 %
 % Demonstrates how to:
-%   1) Connect to the Keysight AWG and output a single-channel sine wave
-%      on Channel 1 with a user-defined frequency.
-%   2) Connect to the Keysight triple-output power supply and sweep Channel
-%      1 from 0 -> 5 V and Channel 2 from 0 -> 12 V while reporting the
-%      programmed values.
+%   1) Applies different bias boltages to the amplifier (0 -> 12 V)
+%   2) Applies different amplifaciton voltages to the amplifier (0 -> 5 V)
+%   3) Amplify the AWG signal
+%   4) See the effect of different sinnusoidal signals levels on the output power
 % -------------------------------------------------------------------------
 
 %% ---------------------------- User inputs -------------------------------
@@ -35,7 +34,7 @@ pmSampleIntervalSec = 1;   % Interval between power samples (seconds)
 
 %% ---------------------------- AWG set up --------------------------------
 AWG = ClassAWG.getInstance();
-AWG.connect();
+AWG.connect(1); % only connects to channel 1
 pause(1); % allow the connection to stabilize
 
 % Build a single sine segment for the requested channel
@@ -60,10 +59,12 @@ AWG.RunSegment(Segment);
 %% ----------------------- Power supply set up ----------------------------
 PS = ClassKeysightSupply.getInstance();
 PS.connect(supplyName);
+pause(1); % allow the connection to stabilize
 
 % Connect to the power meter
 PM = ClassThorlabsPM100D.getInstance();
 PM.connect();
+pause(1); % allow the connection to stabilize
 
 % Turn on both outputs that will be swept
 PS.powerOn(psChannel1);
