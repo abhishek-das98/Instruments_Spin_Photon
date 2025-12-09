@@ -1,5 +1,6 @@
 % PowerMeterPlot
-% MATLAB script that logs Thorlabs PM100D power readings every second for a specified time
+% MATLAB script that logs Thorlabs PM100D power readings every second for a 
+% specified time
 % and plots the results.
 
 % Acquire a singleton instance of the power meter class and connect.
