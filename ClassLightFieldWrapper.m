@@ -238,6 +238,151 @@ classdef (ConstructOnLoad = true) ClassLightFieldWrapper < handle
                     error("LightField:BadMode", "mode must be ""sumY"" or ""meanY"".");
             end
         end
+
+        function [spectraAll, wavelength_nm, tFrames] = acquireTimed_AllFrames( ...
+                obj, center_nm, exposure_ms, duration_minutes, progress_period_seconds)
+            % acquireTimed_AllFrames
+            %
+            % One long, stable LightField acquisition.
+            % - Starts acquisition first, then sets center wavelength while running
+            % - Keeps ALL frames (typically ~1 frame per exposure time)
+            % - Prints progress messages while running
+            %
+            % Outputs:
+            %   spectraAll   : [nW x nFrames] spectra
+            %   wavelength_nm: [nW x 1] wavelength axis (nm)
+            %   tFrames      : [1 x nFrames] datetime timestamps (approx)
+
+            if nargin < 5 || isempty(progress_period_seconds)
+                progress_period_seconds = 10;   % status message every 10 s
+            end
+
+            import PrincetonInstruments.LightField.AddIns.*;
+            import System.IO.FileAccess;
+
+            %% ---- Estimate frame rate ----
+            fps = 1000 / double(exposure_ms);   % valid when exposure dominates
+
+            framesTotal = max(1, round(double(duration_minutes) * 60 * fps));
+            primeFrames = max(1, round(2 * fps));   % ~2 seconds prime
+
+            %% ---- Set exposure ----
+            obj.setValue(CameraSettings.ShutterTimingExposureTime, exposure_ms);
+
+            %% ---- Prime acquisition (initializes hardware) ----
+            obj.setValue(ExperimentSettings.FrameSettingsFramesToStore, int32(primeFrames));
+            obj.stopIfRunning();
+
+            fprintf('[LightField] Priming (%d frames)...\n', primeFrames);
+            obj.experiment.Acquire();
+
+            t0 = tic;
+            while ~obj.experiment.IsRunning
+                pause(0.05);
+                if toc(t0) > 3
+                    error("LightField:PrimeFailed", "Prime acquisition did not start.");
+                end
+            end
+            while obj.experiment.IsRunning
+                pause(0.05);
+            end
+            fprintf('[LightField] Prime completed.\n');
+
+            %% ---- Main acquisition ----
+            obj.setValue(ExperimentSettings.FrameSettingsFramesToStore, int32(framesTotal));
+            obj.stopIfRunning();
+
+            fprintf('[LightField] Starting acquisition: %.1f min (~%d frames @ %.2f fps)\n', ...
+                double(duration_minutes), framesTotal, fps);
+
+            obj.experiment.Acquire();
+
+            % Wait until running, then set center wavelength (GUI trick)
+            t0 = tic;
+            while ~obj.experiment.IsRunning
+                pause(0.05);
+                if toc(t0) > 3
+                    error("LightField:AcquireFailed", "Main acquisition did not start.");
+                end
+            end
+
+            obj.experiment.SetValue( ...
+                SpectrometerSettings.GratingCenterWavelength, center_nm);
+
+            tStart = datetime('now');
+            fprintf('[LightField] Running. Center wavelength set to %g nm.\n', center_nm);
+
+            %% ---- Progress messages ----
+            lastMsg = tic;
+            while obj.experiment.IsRunning
+                if toc(lastMsg) >= progress_period_seconds
+                    fprintf('[LightField] Still running... (%s)\n', char(datetime('now')));
+                    lastMsg = tic;
+                end
+                pause(0.1);
+            end
+            fprintf('[LightField] Acquisition finished. Reading data...\n');
+
+            %% ---- Wavelength calibration ----
+            wavelength_nm = [];
+            if ~isempty(obj.experiment.SystemColumnCalibration)
+                n = obj.experiment.SystemColumnCalibration.Length;
+                wavelength_nm = zeros(n,1);
+                for k = 0:n-1
+                    wavelength_nm(k+1) = obj.experiment.SystemColumnCalibration.Get(k);
+                end
+            end
+
+            %% ---- Open most recent file ----
+            lastfile = [];
+            tWait = tic;
+            while isempty(lastfile)
+                names = obj.application.FileManager.GetRecentlyAcquiredFileNames;
+                if names.Count > 0
+                    lastfile = names.GetItem(0);
+                end
+                if toc(tWait) > 15
+                    error("LightField:NoRecentFile", "No recently acquired file appeared.");
+                end
+                pause(0.05);
+            end
+
+            imageset = obj.application.FileManager.OpenFile(lastfile, FileAccess.Read);
+
+            if imageset.Regions.Length ~= 1
+                error("LightField:MultiROI", ...
+                    "This method assumes a single ROI region.");
+            end
+
+            %% ---- Extract all spectra ----
+            nFrames = imageset.Frames;
+
+            frame0 = imageset.GetFrame(0,0);
+            W = frame0.Width;
+            H = frame0.Height;
+
+            spectraAll = NaN(W, nFrames);
+
+            fprintf('[LightField] Extracting %d frames...\n', nFrames);
+            for i = 0:nFrames-1
+                fr  = imageset.GetFrame(0,i);
+                img = reshape(fr.GetData().double, W, H).';  % H x W
+
+                % If dispersion is along rows, change to: sum(img,2)
+                spectraAll(:, i+1) = sum(img, 1).';
+
+                if mod(i+1, 200) == 0
+                    fprintf('[LightField] Parsed %d / %d frames\n', i+1, nFrames);
+                end
+            end
+
+            %% ---- Approx timestamps for each frame ----
+            tFrames = tStart + seconds((0:nFrames-1) / fps);
+        end
+
+
+
+
     end
 
     methods (Access = private)
