@@ -1,44 +1,42 @@
 classdef (Sealed) ClassMagnetNew < handle
-    % ClassMagnetNew
-    %   Singleton wrapper for APS100 Magnet Power Supply
-    %   External interface uses magnetic field in Tesla where possible
-    %   Internally the supply is set tp field units (Gauss)
+    % ClassMagnetNew (USB Serial, single-channel)
+    %   Control APS100 over USB serial (COM port) using MATLAB serialport.
+    %   No VISA required. Designed for single-channel controller.
 
-    % Dependent properties 
     properties (Dependent = true)
-        Field_T          % Magnetic field in Tesla (from IMAG?)
-        OutputCurrent_A  % Supply output current in A (from IOUT?)
-        MagnetVoltage_V  % Magnet voltage in V (from VMAG?)
-        OutputVoltage_V  % Supply output voltage in V (from VOUT?)
-        UpperLimit_T     % Upper sweep limit in Tesla
-        LowerLimit_T     % Lower sweep limit in Tesla
-        VoltageLimit_V   % Output voltage limit in V
-        HeaterIsOn       % True if persistent heater ON
-        SweepStatus      % Text description of the sweep rate
+        Field_T
+        OutputCurrent_A
+        MagnetVoltage_V
+        OutputVoltage_V
+        UpperLimit_T
+        LowerLimit_T
+        HeaterIsOn
+        SweepStatus
     end
 
-    % Private, fixed settings 
     properties (Access = private)
-        % GPIB board index and device address
-        GPIBBoard   = 0;  % NI Board Index
-        GPIBAddress = 1;  % APS100 device address (set to match front panel GPIB ID)
+        % ---- Connection settings ----
+        ComPort    = "COM4";      % <-- change to your COM port
+        BaudRate   = 115200;      % from your front panel
+        Terminator = "LF";        % try "LF" first; if issues, try "CR/LF"
+        Timeout_s  = 10;
 
-        InstrObj               % GPIB objext handle
-        UploadTimeOut   = 60;  % General timeout for VISA ops (s)
-        WaitTimeCommand = 0.2  % Poll interval when waiting for *OPC?
+        InstrObj                 % serialport handle
 
-        % Units / conversion
-        UnitModeField  = 'G';  % We set APS100 to field units "G" (Gauss)
-        MaxField_T       = 9.0;  % Software limit in Tesla
+        % ---- Command timing ----
+        UploadTimeOut   = 60;
+        WaitTimeCommand = 0.2;
+
+        % ---- Units / safety ----
+        UnitModeField = "G";      % we force UNITS G on connect
+        MaxField_T    = 9.0;      % software safety limit
     end
 
-    % Singleton constructor
     methods (Access = private)
         function obj = ClassMagnetNew()
         end
     end
 
-    % Singleton accessor
     methods (Static)
         function obj = getInstance()
             persistent localObj
@@ -49,340 +47,223 @@ classdef (Sealed) ClassMagnetNew < handle
         end
     end
 
-    % Connection handling
+    %% Connection
     methods
-        function connect(obj)
-            % Open GPIB connection and put supply into a known state
-
-            if isempty(obj.InstrObj) || ~isvalid(obj.InstrObj)
-                obj.InstrObj = gpib('ni', obj.GPIBBoard, obj.GPIBAddress);
-            end
-            if isempty(obj.InstrObj) || ~isvalid(obj.InstrObj)
-                error('ClassMagnetNew:ConnectionFailed', ...
-                    'Failed to create GPIB object for address %d.', obj.GPIBAddress);
-            end
-
-            % Make sure it is closed before reopening
-            try
-                fclose(obj.InstrObj);
-            catch
-            end
-
-            set(obj.InstrObj, 'OutputBufferSize', 1e6);
-            set(obj.InstrObj, 'Timeout', obj.UploadTimeOut);
-
-            fopen(obj.InstrObj);
-
-            % Identify instrument
-            idn = strtrim(obj.QueryDevice('*IDN?'));
-            fprintf('APS100 IDN: %s\n', idn);
-
-            obj.SendCmd('Units G');
+        function SetComPort(obj, comStr)
+            obj.ComPort = string(comStr);
         end
+
+        function Connect(obj)
+            obj.CloseConnection();
+
+            obj.InstrObj = serialport(obj.ComPort, obj.BaudRate, "Timeout", obj.Timeout_s);
+            configureTerminator(obj.InstrObj, obj.Terminator);
+            flush(obj.InstrObj);
+
+            idn = obj.QueryDevice("*IDN?");
+            fprintf("APS100 IDN: %s\n", idn);
+
+            % ---- REQUIRED for USB control ----
+            % Take remote control. If the APS100 is in LOCAL or in a menu, REMOTE will be rejected.
+            obj.SendCmd("REMOTE");
+
+            % Enable error messages temporarily for debugging (set to 0 later if you prefer)
+            obj.SendCmd("ERROR 1");
+
+            % Set field units
+            obj.SendCmd("UNITS G");
+        end
+
 
         function CloseConnection(obj)
-            % Close GPIB link
-            if ~isempty(obj.InstrObj) && isvalid(obj.InstrObj)
-                try
-                    fclose(obj.InstrObj);
-                    fprintf('APS100 connection closed.\n');
-                catch
+            try
+                if ~isempty(obj.InstrObj)
+                    flush(obj.InstrObj);
+                    clear obj.InstrObj;
                 end
+            catch
             end
-        end
-
-        function SysError(obj, msg)
-            % Helper to close and throw a MATLAB error
-            obj.CloseConnection();
-            error('ClassMagnetNew:SysError', '%s', msg);
+            obj.InstrObj = [];
         end
     end
 
-        % Low-level SCPI helpers
-        methods (Access = private)
-            function result = QueryDevice(obj, cmd)
-                % Issue a SCPI query and return trimmed string
-                result = strtrim(query(obj.InstrObj, cmd));
-            end
+    %% Dependent property getters
+    methods
+        function v = get.Field_T(obj),          v = obj.ReadField();          end
+        function v = get.OutputCurrent_A(obj),  v = obj.ReadOutputCurrent();  end
+        function v = get.MagnetVoltage_V(obj),  v = obj.ReadMagnetVoltage();  end
+        function v = get.OutputVoltage_V(obj),  v = obj.ReadOutputVoltage();  end
+        function v = get.UpperLimit_T(obj),     v = obj.ReadUpperLimit();     end
+        function v = get.LowerLimit_T(obj),     v = obj.ReadLowerLimit();     end
+        function v = get.HeaterIsOn(obj),       v = logical(obj.ReadHeaterState()); end
+        function s = get.SweepStatus(obj),      s = obj.ReadSweepStatus();    end
+    end
 
-            function WaitOperationComplete(obj)
-                % Poll *OPC? until all pending operations complete
-                while true
-                    reply = strtrim(query(obj.InstrObj, '*OPC?'));
-                    val = str2double(reply);
-                    if ~isnan(val) && val == 1
-                        break;
-                    end
-                    pause(obj.WaitTimeCommand);
-                end
-            end
-
-            function SendCmd(obj, varargin)
-                % Send a SCPI command and wait for completion
-                if numel(varargin) > 1
-                    scpi_str = strjoin(varargin, ' ');
-                else
-                    scpi_str = varargin{1};
-                end
-                fprintf(obj.InstrObj, scpi_str);
-                obj.WaitOperationComplete();
-            end
-
-            function [val, unitStr] = parseValueWithUnits(~, reply)
-                % Parse "<value> <units>" from APS100 responses.
-                reply = strtrim(reply);
-                tokens = regexp(reply, ...
-                    '([-+]?\d*\.?\d+(?:[Ee][-+]?\d+)?)\s*([A-Za-z]*)', ...
-                    'tokens', 'once');
-                if isempty(tokens)
-                    error('ClassMagnetNew:ParseError', ...
-                        'Could not parse numeric value from "%s".', reply);
-                end
-                val     = str2double(tokens{1});
-                unitStr = tokens{2};
-            end
-
-            function scale = unitToTeslaScale(~, unitStr)
-                % Convert APS100 field units to Tesla
-                unitStr = upper(strtrim(unitStr));
-                switch unitStr
-                    case {'G', 'GAUSS'}
-                        scale = 1e-4;  % 1 G = 1e-4 T
-                    case {'KG', 'KGAUSS'}
-                        scale = 1e-1;  % 1 kG = 0.1 T
-                    case {'T', 'TESLA'}
-                        scale = 1.0;
-                    otherwise
-                        error('ClassMagnetNew:UnknownFieldUnit', ...
-                            'Unknown field unit "%s".', unitStr);
-                end
-            end
-
-            function valField = teslaToConfiguredField(obj, fieldT)
-                % Convert Tesla to instrument field units (we set UNITS G);
-                switch upper(obj.UnitModeField)
-                    case 'G'
-                        valField = fieldT / 1e-4;  % Tesla -> Gauss
-                    otherwise
-                        error('ClassMagnetNew:UnsupportedUnitMode', ...
-                            'UnitModeField "%s" not supported.' obj.UnitModeField);
-                end
+    %% Low-level helpers
+    methods (Access = private)
+        function ensureConnected(obj)
+            if isempty(obj.InstrObj)
+                error("ClassMagnetNew:NotConnected", "Call Connect() first.");
             end
         end
 
-            % Dependent property getters
-            methods
-                function v = get.Field_T(obj)
-                    v = obj.ReadField();
+        function reply = QueryDevice(obj, cmd)
+            obj.ensureConnected();
+            flush(obj.InstrObj);
+
+            cmd = string(cmd);
+            writeline(obj.InstrObj, cmd);
+
+            % Read up to a few lines; skip echoes like "*IDN?"
+            maxLines = 5;
+            reply = "";
+
+            for k = 1:maxLines
+                line = strtrim(string(readline(obj.InstrObj)));
+
+                % If instrument echoes the command, ignore that line
+                if strcmpi(line, strtrim(cmd))
+                    continue;
                 end
 
-                function v = get.OutputCurrent_A(obj)
-                    v = obj.ReadOutputCurrent();
-                end
-
-                function v = get.MagnetVoltage_V(obj)
-                    v = obj.ReadMagnetVoltage();
-                end
-
-                function v = get.OutputVoltage_V(obj)
-                    v = obj.ReadOutputVoltage();
-                end
-
-                function v = get.UpperLimit_T(obj)
-                    v = obj.ReadUpperLimit();
-                end
-
-                function v = get.LowerLimit_T(obj)
-                    v = obj.ReadLowerLimit();
-                end
-
-                function v = get.VoltageLimit_V(obj)
-                    v = obj.ReadVoltageLimit();
-                end
-
-                function v = get.HeaterIsOn(obj)
-                    v = logical(obj.ReadHeaterState());
-                end
-
-                function s = get.SweepStatus(obj)
-                    s = obj.ReadSweepStatus();
-                end
+                % First non-echo line is our reply
+                reply = line;
+                return;
             end
 
-            % High-level magnet control API
-            methods
-                % ----- Heater -----
-                function state = ReadHeaterState(obj)
-                    % 0 = OFF, 1 = ON
-                    reply = obj.QueryDevice('PSHTR?');
-                    state = str2double(reply);  % returns 0 or 1
-                end
+            error("ClassMagnetNew:NoReply", ...
+                "No valid reply received for '%s' (only echo / nothing).", cmd);
+        end
 
-                function HeaterOn(obj)
-                    % Turn persistent switch heater ON
-                    obj.SendCmd('PSHTR ON');
-                end
 
-                function HeaterOff(obj)
-                    % Turn persistent switch heater OFF
-                    obj.SendCmd('PSHTR OFF');
-                end
+        function SendCmd(obj, cmd)
+            obj.ensureConnected();
+            flush(obj.InstrObj);
+            writeline(obj.InstrObj, string(cmd));
+            obj.WaitOperationComplete();
+        end
 
-                % ----- Field / current -----
-                function fieldT = ReadField(obj)
-                    % Magnet field in Tesla, using IMAG?
-                        [val, units] = obj.parseValueWithUnits(obj.QueryDevice('IMAG?'));
-                        fieldT = val * obj.unitToTeslaScale(units);
+        function WaitOperationComplete(obj)
+            t0 = tic;
+            while true
+                r = strtrim(obj.QueryDevice("*OPC?"));
+                val = str2double(r);
+                if ~isnan(val) && val == 1
+                    return;
                 end
-
-                function currentA = ReadOutputCurrent(obj)
-                    % Power supply output current in Amps (IOUT?)
-                    [val, ~] = obj.parseValueWithUnits(obj.QueryDevice('IOUT?'));
-                    currentA = val;
+                if toc(t0) > obj.UploadTimeOut
+                    error("ClassMagnetNew:OPCTimeout", "*OPC? timeout after %.1f s.", obj.UploadTimeOut);
                 end
-
-                function SetField(obj, fieldT)
-                    % Set target magnet field in Tesla via IMAG
-                    if abs(fieldT) > obj.MaxField_T
-                        fprintf(['Requested field %.3f T exceeds software limit %.3f T.', ...
-                            'Command not executed.\n'], fieldT, obj.MaxField_T);
-                        return;
-                    end
-
-                    fieldUnitVal = obj.teslaToConfiguredField(fieldT);
-                    cmd = sprintf('IMAG %.6f', fieldUnitVal);
-                    obj.SendCmd(cmd);
-                end
-
-                function SetCurrent(obj, currentA)
-                    % Alternative: set magnet current directly in Amps.
-                    % Temporarily switch to A units, set, then restore field units.
-                    prevUnits = strtrim(obj.QueryDevice('UNITS?'));
-                    if ~strcmpi(prevUnits, 'A')
-                        obj.SendCmd('UNITS A');
-                    end
-                    cmd = sprintf('IMAG %.6f', currentA);
-                    obj.SendCmd(cmd);
-                    if ~strcmpi(prevUnits, 'A')
-                        obj.SendCmd(['UNITS ' prevUnits]);
-                    end
-                end
-
-                % ----- Limits -----
-                function ulimT = ReadUpperLimit(obj)
-                    % Upper sweep limit in Tesla
-                    [val, units] = obj.parseValueWithUnits(obj.QueryDevice('ULIM?'));
-                    ulimT = val * obj.unitToTeslaScale(units);
-                end
-
-                function llimT = ReadLowerLimit(obj)
-                    % Lower sweep limit in Tesla
-                    [val, units] = obj.parseValueWithUnits(obj.QueryDevice('LLIM?'));
-                    llimT = val * obj.unitToTeslaScale(units);
-                end
-
-                function SetUpperLimit(obj, fieldT)
-                    % Set upper sweep limit in Tesla (ULIM)
-                    if abs(fieldT) > obj.MaxField_T
-                        fprintf(['Upper limit %3f T exceeds software limit %.3f T',  ...
-                            'Command not executed.\n'], fieldT, obj.MaxField_T);
-                        return;
-                    end
-                    fieldUnitVal = obj.teslaToConfiguredField(fieldT);
-                    cmd = sprintf('ULIM %.6f', fieldUnitVal);
-                    obj.SendCmd(cmd);
-                end
-
-                function SetLowerLimit(obj, fieldT)
-                    % Set lower sweep limit in Tesla (LLIM)
-                    if abs(fieldT) > obj.MaxField_T
-                        fprintf(['Lower limit %.3f T exceeds software limit %.3f T', ...
-                            'Command not executed.\n'], fieldT, obj.MaxField_T);
-                        return;
-                    end
-                    fieldUnitVal = obj.teslaToConfiguredField(fieldT);
-                    cmd = sprintf('LLIM %.6f', fieldUnitVal);
-                    obj.SendCmd(cmd);
-                end
-
-                % ----- Voltage -----
-                function v = ReadMagnetVoltage(obj)
-                    % Magnet voltage at Mag.Vin terminals (VMAG?).
-                    [val, ~] = obj.parseValueWithUnits(obj.QueryDevice('VMAG?'));
-                    v = val;
-                end
-
-                function v = ReadOutputVoltage(obj)
-                    % Power supply output voltage at terminals (VOUT?)
-                    [val, ~] = obj.parseValueWithUnits(obj.QueryDevice('VOUT?'));
-                    v = val;
-                end
-
-                function v = ReadVoltageLimit(obj)
-                    % Output voltage limit (VLIM?)
-                    [val, ~] = obj.parseValueWithUnits(obj.QueryDevice('VLIM?'));
-                    v = val;
-                end
-
-                function SetVoltageLimit(obj, vLimit)
-                    % Set output voltage limit in Volts
-                    cmd = sprintf('VLIM %.4f', vLimit);
-                    obj.SendCmd(cmd);
-                end
-
-                % ----- Sweeping -----
-                function Zero(obj, useFast)
-                    % Sweep to zero current
-                    if nargin < 2 || ~useFast
-                        obj.SendCmd('SWEEP ZERO');
-                    else 
-                        obj.SendCmd('SWEEP ZERO FAST');
-                    end
-                end
-
-                function GoToUpperField(obj, useFast)
-                    % Sweep to upper limit (ULIM)
-                    if nargin < 2 || ~useFast
-                        obj.SendCmd('SWEEP UP');
-                    else
-                        obj.SendCmd('SWEEP UP FAST');
-                    end
-                end
-
-                function GoToLowerField(obj, useFast)
-                    % Sweep to lower limit (LLIM)
-                    if nargin < 2 || ~useFast
-                        obj.SendCmd('SWEEP DOWN');
-                    else
-                        obj.SendCmd('SWEEP DOWN FAST');
-                    end
-                end
-
-                function PauseSweep(obj)
-                    % Pause an active sweep
-                    obj.SendCmd('SWEEP PAUSE');
-                end
-
-                function modeStr = ReadSweepStatus(obj)
-                    % Return textual sweep status (SWEEP?)
-                    modeStr = obj.QueryDevice('SWEEP?'); %e.g. 'sweep up fast'
-                end
-
-                % ----- Misc -----
-                function name = GetCoilName(obj)
-                    % Read coil (module) name string
-                    name = obj.QueryDevice('NAME?');
-                end
-
-                function SetCoilName(obj, name)
-                    % Set coil (module) name string (max 16 chars)
-                    name = upper(name);
-                    obj.SendCmd(['NAME ' name]);
-                end
-                
-                function ResetQuench(obj)
-                    % Clear quench condition and return to STANDBY
-                    obj.SendCmd('QRESET');
-                end
+                pause(obj.WaitTimeCommand);
             end
+        end
+
+        function [val, unitStr] = parseValueWithUnits(~, reply)
+            reply = strtrim(reply);
+            tok = regexp(reply, ...
+                '([-+]?\d*\.?\d+(?:[Ee][-+]?\d+)?)\s*([A-Za-z]*)', ...
+                'tokens', 'once');
+            if isempty(tok)
+                error("ClassMagnetNew:ParseError", "Cannot parse reply: '%s'", reply);
+            end
+            val = str2double(tok{1});
+            unitStr = string(tok{2});
+        end
+
+        function scale = unitToTeslaScale(~, unitStr)
+            u = upper(strtrim(unitStr));
+            switch u
+                case {"G","GAUSS",""}   % some replies omit unit
+                    scale = 1e-4;
+                case {"KG","KGAUSS"}
+                    scale = 1e-1;
+                case {"T","TESLA"}
+                    scale = 1.0;
+                otherwise
+                    error("ClassMagnetNew:UnknownFieldUnit", "Unknown unit '%s'.", u);
+            end
+        end
+
+        function instVal = teslaToConfiguredField(obj, fieldT) % Ignore the warning
+            % APS100 expects field inputs in kG when UNITS = G
+            % 1 Tesla = 10 kG
+            instVal = fieldT * 10.0;
+        end
+
+    end
+
+    %% Public high-level API
+    methods
+        % Heater
+        function st = ReadHeaterState(obj)
+            st = str2double(strtrim(obj.QueryDevice("PSHTR?")));
+        end
+        function HeaterOn(obj),  obj.SendCmd("PSHTR ON");  end
+        function HeaterOff(obj), obj.SendCmd("PSHTR OFF"); end
+
+        % Reads
+        function fieldT = ReadField(obj)
+            [val, unitStr] = obj.parseValueWithUnits(obj.QueryDevice("IMAG?"));
+            fieldT = val * obj.unitToTeslaScale(unitStr);
+        end
+        function I = ReadOutputCurrent(obj)
+            [val, ~] = obj.parseValueWithUnits(obj.QueryDevice("IOUT?"));
+            I = val;
+        end
+        function V = ReadMagnetVoltage(obj)
+            [val, ~] = obj.parseValueWithUnits(obj.QueryDevice("VMAG?"));
+            V = val;
+        end
+        function V = ReadOutputVoltage(obj)
+            [val, ~] = obj.parseValueWithUnits(obj.QueryDevice("VOUT?"));
+            V = val;
+        end
+
+        % Set field
+        function SetField(obj, fieldT)
+            if abs(fieldT) > obj.MaxField_T
+                fprintf("Requested %.3f T exceeds limit %.3f T. Not executed.\n", fieldT, obj.MaxField_T);
+                return;
+            end
+            instVal = obj.teslaToConfiguredField(fieldT);
+            obj.SendCmd(sprintf("IMAG %.6f", instVal));
+        end
+
+        % Limits
+        function uT = ReadUpperLimit(obj)
+            [val, unitStr] = obj.parseValueWithUnits(obj.QueryDevice("ULIM?"));
+            uT = val * obj.unitToTeslaScale(unitStr);
+        end
+        function lT = ReadLowerLimit(obj)
+            [val, unitStr] = obj.parseValueWithUnits(obj.QueryDevice("LLIM?"));
+            lT = val * obj.unitToTeslaScale(unitStr);
+        end
+        function SetUpperLimit(obj, fieldT)
+            instVal = obj.teslaToConfiguredField(fieldT);
+            obj.SendCmd(sprintf("ULIM %.6f", instVal));
+        end
+        function SetLowerLimit(obj, fieldT)
+            instVal = obj.teslaToConfiguredField(fieldT);
+            obj.SendCmd(sprintf("LLIM %.6f", instVal));
+        end
+
+        % Sweeps
+        function Zero(obj, useFast)
+            if nargin < 2 || ~useFast, obj.SendCmd("SWEEP ZERO");
+            else,                      obj.SendCmd("SWEEP ZERO FAST");
+            end
+        end
+        function GoToUpperField(obj, useFast)
+            if nargin < 2 || ~useFast, obj.SendCmd("SWEEP UP");
+            else,                      obj.SendCmd("SWEEP UP FAST");
+            end
+        end
+        function GoToLowerField(obj, useFast)
+            if nargin < 2 || ~useFast, obj.SendCmd("SWEEP DOWN");
+            else,                      obj.SendCmd("SWEEP DOWN FAST");
+            end
+        end
+        function PauseSweep(obj), obj.SendCmd("SWEEP PAUSE"); end
+        function s = ReadSweepStatus(obj), s = strtrim(obj.QueryDevice("SWEEP?")); end
+    end
 end
