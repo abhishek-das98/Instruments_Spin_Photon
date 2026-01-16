@@ -1,117 +1,156 @@
 function plotSpectraFromCSV(fileList, plotType, varargin)
-% plotSpectraFromCSV  Plot spectra from CSV files as overlayed curves or subplots.
-% A handy MATLAB code to plot the spectra, in a style that you prefer
-% Choose between overlayed plot/subfigure style plot
-% Input the titles/subtitles
+% plotSpectraFromCSV
+% -------------------------------------------------------------
+% This function plots optical spectra stored in CSV files.
 %
-% Acquire the experimental data from the Lightfield Software, then export
-% as a CSV file
-% After that, use this code to plot
-%   plotSpectraFromCSV(fileList, plotType, ...)
+% You can:
+%    Plot all spectra on the same figure (overlayed)
+%    Plot each spectrum in its own subplot (stacked)
 %
-%   INPUTS
-%   ------
-%   fileList   : Cell array of file names or string array.
-%                Each CSV must have:
-%                   Column 1 = wavelength (nm)
-%                   Column 2 = intensity (counts)
+% Each CSV file must contain:
+%   Column 1 → Wavelength (nm)
+%   Column 2 → Intensity (counts)
 %
-%   plotType   : 'overlayed' or 'subplots'
-%
-%   EXTRA ARGS
-%   ----------
-%   If plotType = 'overlayed'
-%       varargin{1} = overallTitle   (char/string)       [optional]
-%       varargin{2} = legendLabels   (cell array/strings)[optional]
-%
-%   If plotType = 'subplots'
-%       varargin{1} = overallTitle   (char/string)       [optional]
-%       varargin{2} = subplotTitles  (cell array/strings)[optional]
-%
-%   Examples:
-%       files = {'12-10_cavity_2_180mA_0V_exp1s.csv', ...
-%                '12_kG_Magnetic.csv', ...
-%                '180mA_50kG.csv'};
-%
-%       % Overlayed plot with legend labels
-%       plotSpectraFromCSV(files, 'overlayed', ...
-%           'Spectrum at Different Applied Magnetic Fields', ...
-%           {'0 T', '1.2 T', '5.0 T'});
-%
-%       % Subplots with individual titles and overall title
-%       plotSpectraFromCSV(files, 'subplots', ...
-%           'Spectrum at Different Applied Magnetic Fields', ...
-%           {'0 T', '1.2 T', '5.0 T'});
+% -------------------------------------------------------------
+% BASIC IDEA
+% -------------------------------------------------------------
+% 1) Read wavelength & intensity from CSV files
+% 2) Decide how to plot (overlayed or subplots)
+% 3) Add labels, titles, legends
+% 4) Optionally save the figure (.fig + .png)
+% -------------------------------------------------------------
 
-% ---------- Normalize fileList input ----------
+
+%% -------------------------------------------------------------
+% 1) Make sure fileList is always a cell array
+% -------------------------------------------------------------
+% MATLAB loops over cell arrays cleanly.
+% If the user provides a single file name, convert it to a cell.
+
 if ischar(fileList) || (isstring(fileList) && isscalar(fileList))
     fileList = {char(fileList)};
 elseif isstring(fileList)
     fileList = cellstr(fileList);
 end
 
-nFiles = numel(fileList);
+nFiles = numel(fileList);   % number of spectrum files
+
 if nFiles == 0
     error('fileList must contain at least one file name.');
 end
 
-% ---------- Read all spectra ----------
-lambda = cell(nFiles, 1);
+
+%% -------------------------------------------------------------
+% 2) Read data from CSV files
+% -------------------------------------------------------------
+% Store wavelength and intensity for each file separately.
+
+lambda    = cell(nFiles, 1);
 intensity = cell(nFiles, 1);
 
 for k = 1:nFiles
-    data = readmatrix(fileList{k});
+    data = readmatrix(fileList{k});   % read CSV file
+
+    % Basic safety check
     if size(data, 2) < 2
-        error('File "%s" does not have at least two columns.', fileList{k});
+        error('File "%s" must have at least two columns.', fileList{k});
     end
-    lambda{k}    = data(:, 1);
-    intensity{k} = data(:, 2);
+
+    lambda{k}    = data(:,1);
+    intensity{k} = data(:,2);
 end
 
-% ---------- Handle optional arguments ----------
+
+%% -------------------------------------------------------------
+% 3) Decide how to plot
+% -------------------------------------------------------------
+% plotType must be either:
+%   "overlayed" → all spectra on one axes
+%   "subplots"  → one spectrum per subplot
+
 plotType = lower(string(plotType));
 
 switch plotType
+
+    % =========================================================
+    % OVERLAYED PLOT
+    % =========================================================
     case "overlayed"
-        % ---------- Parse inputs ----------
-        if numel(varargin) < 2
-            error(['For ''overlayed'' plots, you must provide:\n' ...
-                '1) overallTitle\n' ...
-                '2) legendLabels (same order as fileList)']);
-        end
 
+        % Overall title is required
+        if numel(varargin) < 1
+            error("For 'overlayed', overallTitle is required.");
+        end
         overallTitle = varargin{1};
-        legendLabels = varargin{2};
 
-        % ---------- Validate legend labels ----------
-        if numel(legendLabels) ~= nFiles
-            error('Number of legend labels (%d) must match number of files (%d).', ...
-                numel(legendLabels), nFiles);
+        % Legend labels (optional for 1 file)
+        legendLabels = [];
+        if numel(varargin) >= 2 && ~isempty(varargin{2})
+            legendLabels = varargin{2};
         end
 
-        % ---------- Make overlayed plot ----------
-        figure;
+        if nFiles > 1
+            if isempty(legendLabels)
+                error('legendLabels required when plotting multiple spectra.');
+            end
+            if numel(legendLabels) ~= nFiles
+                error('Number of legend labels must match number of files.');
+            end
+        end
+
+        % Exposure time (used only for axis label)
+        exposureTime_s = [];
+        if numel(varargin) >= 3 && ~isempty(varargin{3})
+            exposureTime_s = varargin{3};
+            validateExposureTime(exposureTime_s);
+        end
+
+        % Optional file name for saving
+        saveFigName = [];
+        if numel(varargin) >= 4 && ~isempty(varargin{4})
+            saveFigName = varargin{4};
+        end
+
+        % -------- Create the figure --------
+        fig = figure('Color','w');
         hold on; grid on;
 
-        h = gobjects(nFiles, 1);
-
-        % Plot in EXACT same order as fileList
+        h = gobjects(nFiles,1);
         for k = 1:nFiles
             h(k) = plot(lambda{k}, intensity{k}, 'LineWidth', 1.6);
         end
 
         xlabel('Wavelength (nm)', 'FontSize', 12);
-        ylabel('Intensity (counts)', 'FontSize', 12);
 
-        % Legend strictly follows input order
-        legend(h, legendLabels, 'Location', 'best', 'FontSize', 11);
+        if isempty(exposureTime_s)
+            ylabel('Intensity (counts)', 'FontSize', 12);
+        else
+            ylabel(sprintf('Intensity (counts / %.3gs)', exposureTime_s), ...
+                   'FontSize', 12);
+        end
 
         title(overallTitle, 'FontSize', 14);
 
+        if ~isempty(legendLabels)
+            legend(h, legendLabels, 'Location', 'best', 'FontSize', 11);
+        end
+
         hold off;
 
+        % -------- Save figure if requested --------
+        if ~isempty(saveFigName)
+            savefig(fig, saveFigName + ".fig");                      % Editable MATLAB figure
+            exportgraphics(fig, saveFigName + ".png", ...
+                           "Resolution", 300);                      % High-res image
+        end
 
+
+    % =========================================================
+    % SUBPLOTS
+    % =========================================================
     case "subplots"
+
+        % Optional inputs
         overallTitle  = '';
         subplotTitles = [];
 
@@ -122,28 +161,43 @@ switch plotType
             subplotTitles = varargin{2};
         end
 
-        % Auto-generate subplot titles from file names if not provided
+        exposureTime_s = [];
+        if numel(varargin) >= 3 && ~isempty(varargin{3})
+            exposureTime_s = varargin{3};
+            validateExposureTime(exposureTime_s);
+        end
+
+        saveFigName = [];
+        if numel(varargin) >= 4 && ~isempty(varargin{4})
+            saveFigName = varargin{4};
+        end
+
+        % If no subplot titles are given, use file names
         if isempty(subplotTitles)
-            subplotTitles = cell(nFiles, 1);
+            subplotTitles = cell(nFiles,1);
             for k = 1:nFiles
                 [~, name, ~] = fileparts(fileList{k});
                 subplotTitles{k} = name;
             end
         end
 
-        if numel(subplotTitles) ~= nFiles
-            error('Number of subplotTitles (%d) must match number of files (%d).', ...
-                numel(subplotTitles), nFiles);
-        end
+        fig = figure('Color','w');
 
-        % ---------- Make subplots ----------
-        figure;
+        % Plot one spectrum per subplot
         for k = 1:nFiles
-            subplot(nFiles, 1, k);
+            subplot(nFiles,1,k);
             plot(lambda{k}, intensity{k}, 'LineWidth', 1.6);
             grid on;
+
             xlabel('Wavelength (nm)', 'FontSize', 11);
-            ylabel('Intensity (counts)', 'FontSize', 11);
+
+            if isempty(exposureTime_s)
+                ylabel('Intensity (counts)', 'FontSize', 11);
+            else
+                ylabel(sprintf('counts / %.3gs', exposureTime_s), ...
+                       'FontSize', 11);
+            end
+
             title(subplotTitles{k}, 'FontSize', 13);
         end
 
@@ -151,7 +205,27 @@ switch plotType
             sgtitle(overallTitle, 'FontSize', 14);
         end
 
+        % -------- Save figure if requested --------
+        if ~isempty(saveFigName)
+            savefig(fig, saveFigName + ".fig");
+            exportgraphics(fig, saveFigName + ".png", ...
+                           "Resolution", 300);
+        end
+
     otherwise
-        error('plotType must be either "overlayed" or "subplots".');
+        error('plotType must be "overlayed" or "subplots".');
+end
+
+end
+
+
+%% -------------------------------------------------------------
+% Helper function: exposure time validation
+% -------------------------------------------------------------
+% Ensures exposure time is physically meaningful.
+
+function validateExposureTime(t)
+if ~isscalar(t) || ~isnumeric(t) || isnan(t) || isinf(t) || t <= 0
+    error('exposureTime_s must be a positive scalar (seconds).');
 end
 end
