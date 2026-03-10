@@ -3,7 +3,7 @@ function SignalVec_Random = CreateRandomPulses(obj, M, ka, init_duration, ...
 % Creates a sinusoidal random pulse sequence (Channel 2)
 
     % Generate filtered random binary sequence
-    filter = generate_filter(M+1, ka);
+    filter = generate_filter_for_random_pulses(M+1, ka);
     U_gaussian = randn(1, M+1);
     V_filtered = conv(U_gaussian, filter, 'same');
     U_binary = sign(V_filtered);
