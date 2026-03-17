@@ -16,20 +16,23 @@ function cfg = RandomPulseExperiment_DefaultConfig()
     cfg.Channels = {'Initialization', 'Rotation', 'Trigger', ''};
     cfg.UserDelaysNs = [0, 0, 0, 0];
 
+    % --- Experiment-count controls requested for random spectroscopy ---
+    cfg.N2 = 5;  % repetitions of one full pulse sequence (init -> next init)
+    cfg.N1 = 3;  % number of random realizations for one basis
+    cfg.BasisList = {'X'};  % keep simple for now; extend later as needed
+
     % --- Random pulse sequence parameters ---
-    cfg.Random.M = 24;                 % number of pi slots in the random train
-    cfg.Random.ka = pi / 8;            % filter control parameter
-    cfg.Random.InitDurationNs = 10;    % initialization duration before random block
-    cfg.Random.PiDurationNs = 8;       % pi pulse duration in random block
-    cfg.Random.TauNs = 20;             % interpulse free-evolution time
-    cfg.Random.TauInitialNs = 5;       % delay between init and first pi/2
-    cfg.Random.FrequencyGHz = 9.5;     % rotation drive frequency in GHz
-    cfg.Random.Frame = 'rotating';     % 'rotating' or 'lab'
+    cfg.Random.M = 24;                       % number of pi slots in random train
+    cfg.Random.ka = pi / 8;                  % filter control parameter
+    cfg.Random.TotalInterrogationTimeNs = 480; % T, so tau = T/M and tau_initial = T/(2M)
+    cfg.Random.InitDurationNs = 10;          % initialization duration before random block
+    cfg.Random.PiDurationNs = 8;             % pi pulse duration in random block
+    cfg.Random.FrequencyGHz = 9.5;           % rotation drive frequency in GHz
+    cfg.Random.Frame = 'rotating';           % 'rotating' or 'lab'
 
     % --- Initialization / trigger amplitudes ---
-    cfg.InitAmplitude = 1.0;           % normalized AWG amplitude for init channel
-    cfg.TriggerAmplitude = 1.0;        % marker-like digital trigger level (0/1)
-
+    cfg.InitAmplitude = 1.0;   % normalized AWG amplitude for init channel
+    cfg.TriggerAmplitude = 1.0; % marker-like digital trigger level (0/1)
 
     % --- Optional bath polarization block (mirrors Echo_Experiment style) ---
     cfg.BathPolarization.Enable = false;
