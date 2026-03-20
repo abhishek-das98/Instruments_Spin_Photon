@@ -1,23 +1,28 @@
 % MeasureT1.m
 % Edit the settings in this block, then press Run.
 
-biasVoltage_V = 0.00;
+biasVoltage_V = 0.00;              % Edit it to have minimum optical power when RF voltage is 0
 initializationPulseHeight = 1.00;  % User AWG level for the initialization pulse.
-waitTimes_ns = 5:5:100;
+waitTimes_ns = 5:5:100;            % Free Evolution time Array
+
+picoharpTriggerLowVoltage_V = -0.5;
+picoharpTriggerHighVoltage_V = 0.0;
+timetaggerTriggerLowVoltage_V = 0.0;
+timetaggerTriggerHighVoltage_V = 0.65;
 
 darkCountDuration_ns = 5;
 initializationPulseDuration_ns = 5;
 finalWait_ns = [];  % Leave empty to use 2*max(waitTimes_ns).
 
+acquisitionDevice = 'Picoharp';  % 'Picoharp' or 'TimeTagger'
 acquisitionTime_s = 3;
 binResolution_ps = 512;
 
-triggerLowVoltage_V = -0.5;
-triggerHighVoltage_V = 0.0;
 
-saveResults = false;
-outputFolder = pwd;
-baseFileName = '';
+shouldSaveResults = false;
+outputFolder = ['/Users/abhishekdas/Library/CloudStorage/OneDrive-NorthCarolinaStateUniversity/' ...
+    '    HardwareStuff/Results'];
+baseFileName = 'Experiment_T1_Practice';
 
 cfg.waveform.darkCountDuration_ns = darkCountDuration_ns;
 cfg.waveform.initDuration_ns = initializationPulseDuration_ns;
@@ -29,12 +34,14 @@ cfg.awg.channelTrigger = 2;
 cfg.awg.userDelays_ns = [0, 0, 0, 0];
 cfg.awg.initOnUserLevel = initializationPulseHeight;
 cfg.awg.initOffUserLevel = 0.5;  % Internal AWG level that gives 0 V in your setup.
-cfg.awg.triggerLowVoltage_V = triggerLowVoltage_V;
-cfg.awg.triggerHighVoltage_V = triggerHighVoltage_V;
 cfg.awg.settleTime_s = 0.5;
 
-cfg.picoharp.acquisitionTime_s = acquisitionTime_s;
-cfg.picoharp.resolution_ps = binResolution_ps;
+cfg.acquisition.device = acquisitionDevice;
+cfg.acquisition.time_s = acquisitionTime_s;
+cfg.acquisition.resolution_ps = binResolution_ps;
+cfg.acquisition.pollPeriod_s = 0.25;
+
+
 cfg.picoharp.histogramOffset_ps = 0;
 cfg.picoharp.syncOffset_ps = 0;
 cfg.picoharp.syncDiscriminator_mV = 50;
@@ -42,7 +49,12 @@ cfg.picoharp.syncZeroCross_mV = 10;
 cfg.picoharp.signalDiscriminator_mV = 50;
 cfg.picoharp.signalZeroCross_mV = 10;
 cfg.picoharp.countStop = 65535;
-cfg.picoharp.pollPeriod_s = 0.25;
+
+
+cfg.timetagger.triggerChannel = 1;
+cfg.timetagger.photonChannel = 2;
+cfg.timetagger.triggerLevel_V = 0.05;
+cfg.timetagger.photonLevel_V = 0.10;
 
 cfg.supply.biasVoltage_V = biasVoltage_V;
 cfg.supply.currentLimit_A = 0.01;
@@ -54,12 +66,20 @@ cfg.analysis.backgroundWindowStart_ns = 0;
 cfg.analysis.backgroundWindowDuration_ns = darkCountDuration_ns;
 cfg.analysis.syncPeriodTolerance_ns = 2.0;
 
-cfg.output.saveResults = saveResults;
+cfg.output.saveResults = shouldSaveResults;
 cfg.output.outputFolder = outputFolder;
 cfg.output.baseFileName = baseFileName;
 
 cfg.cleanup.turnOutputsOff = true;
 cfg.cleanup.disconnectInstruments = true;
+
+if strcmpi(cfg.acquisition.device, 'Picoharp')
+    cfg.awg.triggerLowVoltage_V = picoharpTriggerLowVoltage_V;
+    cfg.awg.triggerHighVoltage_V = picoharpTriggerHighVoltage_V;
+else
+    cfg.awg.triggerLowVoltage_V = timetaggerTriggerLowVoltage_V;
+    cfg.awg.triggerHighVoltage_V = timetaggerTriggerHighVoltage_V;
+end
 
 results = runMeasureT1Internal(cfg);
 
@@ -68,43 +88,45 @@ function results = runMeasureT1Internal(cfg)
     addpath(fileparts(mfilename('fullpath')));
 
     awg = [];
-    picoharp = [];
+    detector = [];
     supply = [];
-    cleanupObj = onCleanup(@() cleanupInstruments(awg, picoharp, supply, cfg)); %#ok<NASGU>
+    cleanupObj = onCleanup(@() cleanupInstruments(awg, detector, supply, cfg)); %#ok<NASGU>
 
-    figures = createFigures();
+    figures = createFigures(cfg);
 
     awg = ClassAWG.getInstance();
-    picoharp = ClassPicoharp.getInstance();
+    detector = createDetectorHandle(cfg);
     supply = ClassKeysightSupply.getInstance();
 
-    connectAndConfigureInstruments(awg, picoharp, supply, cfg);
+    connectAndConfigureInstruments(awg, detector, supply, cfg);
     timing = buildAndRunSequence(awg, cfg);
+    prepareDetectorForSequence(detector, timing, cfg);
 
     pause(cfg.awg.settleTime_s);
-    syncRate_Hz = double(picoharp.GetSyncRate());
+    syncRate_Hz = double(detector.GetSyncRate());
     if syncRate_Hz <= 0
-        error('PicoHarp sync rate is zero. Check the trigger cable and trigger waveform.');
+        error('%s sync rate is zero. Check the trigger cable and trigger waveform.', cfg.acquisition.device);
     end
 
     timing.syncRate_Hz = syncRate_Hz;
-    timing.syncPeriod_ns_fromPicoharp = 1e9 / syncRate_Hz;
-    timing.histogramFinalBin = min(round(timing.sequenceDuration_ns * 1000 / picoharp.Resolution), 65536);
+    timing.syncPeriod_ns_fromDetector = 1e9 / syncRate_Hz;
+    timing.histogramFinalBin = min(round(timing.sequenceDuration_ns * 1000 / detector.Resolution), 65536);
 
-    if abs(timing.syncPeriod_ns_fromPicoharp - timing.sequenceDuration_ns) > cfg.analysis.syncPeriodTolerance_ns
-        warning(['Measured PicoHarp sync period (%.3f ns) differs from the AWG sequence period ' ...
+    if abs(timing.syncPeriod_ns_fromDetector - timing.sequenceDuration_ns) > cfg.analysis.syncPeriodTolerance_ns
+        warning(['Measured %s sync period (%.3f ns) differs from the AWG sequence period ' ...
             '(%.3f ns). Using the AWG period for integration.'], ...
-            timing.syncPeriod_ns_fromPicoharp, timing.sequenceDuration_ns);
+            cfg.acquisition.device, timing.syncPeriod_ns_fromDetector, timing.sequenceDuration_ns);
     end
 
-    results = acquireAndFit(picoharp, timing, cfg, figures);
+    results = acquireAndFit(detector, timing, cfg, figures);
     results.cfg = cfg;
     results.timing = timing;
+    results.detectorName = cfg.acquisition.device;
 
     fprintf('\nExtracted T1 = %.3f ns\n', results.fit.T1_ns);
 
     if cfg.output.saveResults
-        saveResults(results, figures, cfg);
+        saveMeasurementResults(results, figures, cfg);
     end
 end
 
@@ -130,17 +152,26 @@ function cfg = validateConfig(cfg)
     if cfg.awg.initOnUserLevel <= cfg.awg.initOffUserLevel
         error('initializationPulseHeight must be larger than the internal off level of 0.5.');
     end
+
+    validDevices = {'Picoharp', 'TimeTagger'};
+    if ~any(strcmpi(cfg.acquisition.device, validDevices))
+        error('acquisitionDevice must be ''Picoharp'' or ''TimeTagger''.');
+    end
+
+    if cfg.timetagger.triggerChannel == cfg.timetagger.photonChannel
+        error('TimeTagger triggerChannel and photonChannel must be different.');
+    end
 end
 
-function figures = createFigures()
-    figures.histogram = figure('Name', 'T1 Histogram', 'Color', 'w');
+function figures = createFigures(cfg)
+    figures.histogram = figure('Name', [cfg.acquisition.device ' Histogram'], 'Color', 'w');
     clf(figures.histogram);
     axes('Parent', figures.histogram);
     hold on;
     box on;
     xlabel('Time (ns)');
     ylabel('Counts');
-    title('PicoHarp Histogram');
+    title([cfg.acquisition.device ' Histogram']);
 
     figures.t1 = figure('Name', 'T1 Fit', 'Color', 'w');
     clf(figures.t1);
@@ -152,14 +183,22 @@ function figures = createFigures()
     title('T1 Extraction');
 end
 
-function connectAndConfigureInstruments(awg, picoharp, supply, cfg)
+function detector = createDetectorHandle(cfg)
+    if strcmpi(cfg.acquisition.device, 'Picoharp')
+        detector = ClassPicoharp.getInstance();
+    else
+        detector = ClassTimeTagger.getInstance();
+    end
+end
+
+function connectAndConfigureInstruments(awg, detector, supply, cfg)
     try
         awg.CloseConnection();
     catch
     end
 
     try
-        picoharp.CloseConnection();
+        detector.CloseConnection();
     catch
     end
 
@@ -176,16 +215,23 @@ function connectAndConfigureInstruments(awg, picoharp, supply, cfg)
     awg.SetAmpl(cfg.awg.channelTrigger, triggerAmplitude_V);
     awg.SetOffset(cfg.awg.channelTrigger, triggerOffset_V);
 
-    picoharp.connect();
-    picoharp.SetTimeStop(cfg.picoharp.acquisitionTime_s);
-    picoharp.SetResolution(cfg.picoharp.resolution_ps);
-    picoharp.SetOffset(cfg.picoharp.histogramOffset_ps);
-    picoharp.SetZeroOffset0(cfg.picoharp.syncOffset_ps);
-    picoharp.SetZeroDiscr0(cfg.picoharp.syncDiscriminator_mV);
-    picoharp.SetZeroCr0(cfg.picoharp.syncZeroCross_mV);
-    picoharp.SetZeroDiscr1(cfg.picoharp.signalDiscriminator_mV);
-    picoharp.SetZeroCr1(cfg.picoharp.signalZeroCross_mV);
-    picoharp.SetCountStop(cfg.picoharp.countStop);
+    detector.connect();
+    detector.SetTimeStop(cfg.acquisition.time_s);
+    detector.SetResolution(cfg.acquisition.resolution_ps);
+
+    if strcmpi(cfg.acquisition.device, 'Picoharp')
+        detector.SetOffset(cfg.picoharp.histogramOffset_ps);
+        detector.SetZeroOffset0(cfg.picoharp.syncOffset_ps);
+        detector.SetZeroDiscr0(cfg.picoharp.syncDiscriminator_mV);
+        detector.SetZeroCr0(cfg.picoharp.syncZeroCross_mV);
+        detector.SetZeroDiscr1(cfg.picoharp.signalDiscriminator_mV);
+        detector.SetZeroCr1(cfg.picoharp.signalZeroCross_mV);
+        detector.SetCountStop(cfg.picoharp.countStop);
+    else
+        detector.SetChannels(cfg.timetagger.triggerChannel, cfg.timetagger.photonChannel);
+        detector.SetTriggerLevels(cfg.timetagger.triggerChannel, cfg.timetagger.triggerLevel_V);
+        detector.SetTriggerLevels(cfg.timetagger.photonChannel, cfg.timetagger.photonLevel_V);
+    end
 
     supply.connect('TriplePowerSupply');
     supply.setCurrent(cfg.supply.currentLimit_A, cfg.supply.channel);
@@ -194,12 +240,18 @@ function connectAndConfigureInstruments(awg, picoharp, supply, cfg)
     pause(cfg.supply.settleTime_s);
 end
 
+function prepareDetectorForSequence(detector, timing, cfg)
+    if strcmpi(cfg.acquisition.device, 'TimeTagger')
+        detector.SetNumBins(max(round(timing.sequenceDuration_ns * 1000 / cfg.acquisition.resolution_ps), 1));
+    end
+end
+
 function timing = buildAndRunSequence(awg, cfg)
     [initEndTimes, initTypes, initParams, pulseStartTimes_ns, requestedSequenceDuration_ns] = buildInitializationSections(cfg);
     initWaveform = awg.CreateWaveform(initEndTimes, initTypes, initParams, cfg.awg.channelInitialization);
 
     [triggerEndTimes, triggerTypes, triggerParams] = buildTriggerSections( ...
-        requestedSequenceDuration_ns, pulseStartTimes_ns(1));
+        requestedSequenceDuration_ns, pulseStartTimes_ns(1), cfg);
     triggerWaveform = awg.CreateWaveform(triggerEndTimes, triggerTypes, triggerParams, cfg.awg.channelTrigger);
 
     segment = cell(1, 4);
@@ -243,7 +295,7 @@ function [endTimes, types, params, pulseStartTimes_ns, totalTime_ns] = buildInit
     totalTime_ns = currentTime_ns;
 end
 
-function [endTimes, types, params] = buildTriggerSections(sequenceDuration_ns, firstPulseStart_ns)
+function [endTimes, types, params] = buildTriggerSections(sequenceDuration_ns, firstPulseStart_ns, cfg)
     negativeStart_ns = firstPulseStart_ns;
     negativeEnd_ns = min(firstPulseStart_ns + sequenceDuration_ns / 2, sequenceDuration_ns);
 
@@ -251,20 +303,28 @@ function [endTimes, types, params] = buildTriggerSections(sequenceDuration_ns, f
     types = {};
     params = {};
 
+    if strcmpi(cfg.acquisition.device, 'TimeTagger')
+        inactiveLevel = -1;
+        activeLevel = 1;
+    else
+        inactiveLevel = 1;
+        activeLevel = -1;
+    end
+
     if negativeStart_ns > 0
         endTimes(end + 1) = negativeStart_ns; %#ok<AGROW>
         types{end + 1} = 'dc'; %#ok<AGROW>
-        params{end + 1}.Offset = 1; %#ok<AGROW>
+        params{end + 1}.Offset = inactiveLevel; %#ok<AGROW>
     end
 
     endTimes(end + 1) = negativeEnd_ns; %#ok<AGROW>
     types{end + 1} = 'dc'; %#ok<AGROW>
-    params{end + 1}.Offset = -1; %#ok<AGROW>
+    params{end + 1}.Offset = activeLevel; %#ok<AGROW>
 
     if negativeEnd_ns < sequenceDuration_ns
         endTimes(end + 1) = sequenceDuration_ns; %#ok<AGROW>
         types{end + 1} = 'dc'; %#ok<AGROW>
-        params{end + 1}.Offset = 1; %#ok<AGROW>
+        params{end + 1}.Offset = inactiveLevel; %#ok<AGROW>
     end
 end
 
@@ -279,7 +339,7 @@ function [endTimes, types, params, currentTime_ns] = appendDcSection(endTimes, t
     params{end + 1}.Offset = level; %#ok<AGROW>
 end
 
-function results = acquireAndFit(picoharp, timing, cfg, figures)
+function results = acquireAndFit(detector, timing, cfg, figures)
     figure(figures.histogram);
     histogramPlot = plot(nan, nan, 'b-', 'LineWidth', 1.2);
 
@@ -288,20 +348,20 @@ function results = acquireAndFit(picoharp, timing, cfg, figures)
     fitPlot = plot(nan, nan, 'r-', 'LineWidth', 1.5, 'DisplayName', 'Fit');
     legend('Location', 'best');
 
-    picoharp.StartAcquisition();
+    detector.StartAcquisition();
 
-    while ~picoharp.CheckAquisitionDone()
+    while ~detector.CheckAquisitionDone()
         loopTimer = tic;
-        [timeAxis_ns, histogram] = picoharp.GetHistogram();
-        analysis = analyzeHistogram(histogram, timing, picoharp.Resolution);
+        [timeAxis_ns, histogram] = detector.GetHistogram();
+        analysis = analyzeHistogram(histogram, timing, detector.Resolution);
         updatePlots(histogramPlot, dataPlot, fitPlot, timeAxis_ns, histogram, analysis, timing);
-        pause(max(cfg.picoharp.pollPeriod_s - toc(loopTimer), 0));
+        pause(max(cfg.acquisition.pollPeriod_s - toc(loopTimer), 0));
     end
 
-    [timeAxis_ns, histogram] = picoharp.GetHistogram();
-    analysis = analyzeHistogram(histogram, timing, picoharp.Resolution);
+    [timeAxis_ns, histogram] = detector.GetHistogram();
+    analysis = analyzeHistogram(histogram, timing, detector.Resolution);
     updatePlots(histogramPlot, dataPlot, fitPlot, timeAxis_ns, histogram, analysis, timing);
-    picoharp.StopAcquisition();
+    detector.StopAcquisition();
 
     results.timeAxis_ns = timeAxis_ns;
     results.histogram = histogram;
@@ -416,9 +476,9 @@ function updatePlots(histogramPlot, dataPlot, fitPlot, timeAxis_ns, histogram, a
     drawnow;
 end
 
-function saveResults(results, figures, cfg)
+function saveMeasurementResults(results, figures, cfg)
     if isempty(cfg.output.baseFileName)
-        baseName = ['T1_' datestr(now, 'yyyymmdd_HHMMss')];
+        baseName = ['T1_' char(datetime("now", "Format", "yyyyMMdd_HHmmss"))];
     else
         baseName = cfg.output.baseFileName;
     end
@@ -432,7 +492,7 @@ function saveResults(results, figures, cfg)
     saveas(figures.t1, fullfile(cfg.output.outputFolder, [baseName '_T1.png']));
 end
 
-function cleanupInstruments(awg, picoharp, supply, cfg)
+function cleanupInstruments(awg, detector, supply, cfg)
     if cfg.cleanup.turnOutputsOff
         try
             if ~isempty(awg)
@@ -451,15 +511,15 @@ function cleanupInstruments(awg, picoharp, supply, cfg)
 
     if cfg.cleanup.disconnectInstruments
         try
-            if ~isempty(picoharp)
-                picoharp.StopAcquisition();
+            if ~isempty(detector)
+                detector.StopAcquisition();
             end
         catch
         end
 
         try
-            if ~isempty(picoharp)
-                picoharp.CloseConnection();
+            if ~isempty(detector)
+                detector.CloseConnection();
             end
         catch
         end
