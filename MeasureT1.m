@@ -14,7 +14,7 @@ darkCountDuration_ns = 5;
 initializationPulseDuration_ns = 5;
 finalWait_ns = [];  % Leave empty to use 2*max(waitTimes_ns).
 
-acquisitionDevice = 'Picoharp';  % 'Picoharp' or 'TimeTagger'
+acquisitionDevice = 'TimeTagger';  % 'Picoharp' or 'TimeTagger'
 acquisitionTime_s = 3;
 binResolution_ps = 512;
 
