@@ -1,22 +1,23 @@
 % MeasureT1.m
 % Edit the settings in this block, then press Run.
 
-biasVoltage_V = 0.00;              % Edit it to have minimum optical power when RF voltage is 0
+biasVoltage_V = 2.97;              % Edit it to have minimum optical power when RF voltage is 0
 initializationPulseHeight = 1.00;  % User AWG level for the initialization pulse.
 waitTimes_ns = 5:5:100;            % Free Evolution time Array
 
 picoharpTriggerLowVoltage_V = -0.5;
 picoharpTriggerHighVoltage_V = 0.0;
 timetaggerTriggerLowVoltage_V = 0.0;
-timetaggerTriggerHighVoltage_V = 0.65;
+timetaggerTriggerHighVoltage_V = 1.0;
 
 darkCountDuration_ns = 5;
-initializationPulseDuration_ns = 5;
+initializationPulseDuration_ns = 8;
 finalWait_ns = [];  % Leave empty to use 2*max(waitTimes_ns).
 
 acquisitionDevice = 'TimeTagger';  % 'Picoharp' or 'TimeTagger'
-acquisitionTime_s = 3;
+acquisitionTime_s = 30;
 binResolution_ps = 512;
+plotWaveforms = true;
 
 
 shouldSaveResults = false;
@@ -53,8 +54,8 @@ cfg.picoharp.countStop = 65535;
 
 cfg.timetagger.triggerChannel = 1;
 cfg.timetagger.photonChannel = 2;
-cfg.timetagger.triggerLevel_V = 0.05;
-cfg.timetagger.photonLevel_V = 0.10;
+cfg.timetagger.triggerLevel_V = 0.10;
+cfg.timetagger.photonLevel_V = 0.05;
 
 cfg.supply.biasVoltage_V = biasVoltage_V;
 cfg.supply.currentLimit_A = 0.01;
@@ -69,6 +70,8 @@ cfg.analysis.syncPeriodTolerance_ns = 2.0;
 cfg.output.saveResults = shouldSaveResults;
 cfg.output.outputFolder = outputFolder;
 cfg.output.baseFileName = baseFileName;
+
+cfg.debug.plotWaveforms = plotWaveforms;
 
 cfg.cleanup.turnOutputsOff = true;
 cfg.cleanup.disconnectInstruments = true;
@@ -99,8 +102,9 @@ function results = runMeasureT1Internal(cfg)
     supply = ClassKeysightSupply.getInstance();
 
     connectAndConfigureInstruments(awg, detector, supply, cfg);
-    timing = buildAndRunSequence(awg, cfg);
+    timing = buildAndRunSequence(awg, cfg, figures);
     prepareDetectorForSequence(detector, timing, cfg);
+    reportDetectorRates(detector, cfg);
 
     pause(cfg.awg.settleTime_s);
     syncRate_Hz = double(detector.GetSyncRate());
@@ -181,6 +185,12 @@ function figures = createFigures(cfg)
     xlabel('Wait time (ns)');
     ylabel('Normalized signal');
     title('T1 Extraction');
+
+    figures.waveforms = [];
+    if cfg.debug.plotWaveforms
+        figures.waveforms = figure('Name', 'AWG Waveforms', 'Color', 'w');
+        clf(figures.waveforms);
+    end
 end
 
 function detector = createDetectorHandle(cfg)
@@ -246,7 +256,27 @@ function prepareDetectorForSequence(detector, timing, cfg)
     end
 end
 
-function timing = buildAndRunSequence(awg, cfg)
+function reportDetectorRates(detector, cfg)
+    pause(0.2);
+
+    if strcmpi(cfg.acquisition.device, 'Picoharp')
+        syncRate_Hz = double(detector.GetSyncRate());
+        signalRate_Hz = double(detector.ReadCounter(1));
+
+        fprintf('PicoHarp sync rate: %.0f Hz\n', syncRate_Hz);
+        fprintf('PicoHarp signal rate: %.0f Hz\n', signalRate_Hz);
+    else
+        triggerRate_Hz = double(detector.ReadCounter(cfg.timetagger.triggerChannel));
+        photonRate_Hz = double(detector.ReadCounter(cfg.timetagger.photonChannel));
+
+        fprintf('TimeTagger trigger rate (channel %d): %.0f Hz\n', ...
+            cfg.timetagger.triggerChannel, triggerRate_Hz);
+        fprintf('TimeTagger photon rate (channel %d): %.0f Hz\n', ...
+            cfg.timetagger.photonChannel, photonRate_Hz);
+    end
+end
+
+function timing = buildAndRunSequence(awg, cfg, figures)
     [initEndTimes, initTypes, initParams, pulseStartTimes_ns, requestedSequenceDuration_ns] = buildInitializationSections(cfg);
     initWaveform = awg.CreateWaveform(initEndTimes, initTypes, initParams, cfg.awg.channelInitialization);
 
@@ -266,6 +296,10 @@ function timing = buildAndRunSequence(awg, cfg)
     timing.integrationWindow_ns = cfg.analysis.integrationWindow_ns;
     timing.backgroundWindowStart_ns = cfg.analysis.backgroundWindowStart_ns;
     timing.backgroundWindowDuration_ns = cfg.analysis.backgroundWindowDuration_ns;
+
+    if cfg.debug.plotWaveforms
+        plotCreatedWaveforms(figures.waveforms, initWaveform, triggerWaveform, timing, awg, cfg);
+    end
 end
 
 function [endTimes, types, params, pulseStartTimes_ns, totalTime_ns] = buildInitializationSections(cfg)
@@ -296,8 +330,8 @@ function [endTimes, types, params, pulseStartTimes_ns, totalTime_ns] = buildInit
 end
 
 function [endTimes, types, params] = buildTriggerSections(sequenceDuration_ns, firstPulseStart_ns, cfg)
-    negativeStart_ns = firstPulseStart_ns;
-    negativeEnd_ns = min(firstPulseStart_ns + sequenceDuration_ns / 2, sequenceDuration_ns);
+    activeStart_ns = 0;
+    activeEnd_ns = min(firstPulseStart_ns + sequenceDuration_ns / 2, sequenceDuration_ns);
 
     endTimes = [];
     types = {};
@@ -311,17 +345,14 @@ function [endTimes, types, params] = buildTriggerSections(sequenceDuration_ns, f
         activeLevel = -1;
     end
 
-    if negativeStart_ns > 0
-        endTimes(end + 1) = negativeStart_ns; %#ok<AGROW>
-        types{end + 1} = 'dc'; %#ok<AGROW>
-        params{end + 1}.Offset = inactiveLevel; %#ok<AGROW>
-    end
-
-    endTimes(end + 1) = negativeEnd_ns; %#ok<AGROW>
+    % Keep the trigger in its active state from the start of the sequence,
+    % including the dark-count window.
+    endTimes(end + 1) = activeEnd_ns; %#ok<AGROW>
     types{end + 1} = 'dc'; %#ok<AGROW>
     params{end + 1}.Offset = activeLevel; %#ok<AGROW>
 
-    if negativeEnd_ns < sequenceDuration_ns
+    if activeEnd_ns < sequenceDuration_ns
+        % Return to the baseline trigger level for the second half of the sequence.
         endTimes(end + 1) = sequenceDuration_ns; %#ok<AGROW>
         types{end + 1} = 'dc'; %#ok<AGROW>
         params{end + 1}.Offset = inactiveLevel; %#ok<AGROW>
@@ -353,13 +384,13 @@ function results = acquireAndFit(detector, timing, cfg, figures)
     while ~detector.CheckAquisitionDone()
         loopTimer = tic;
         [timeAxis_ns, histogram] = detector.GetHistogram();
-        analysis = analyzeHistogram(histogram, timing, detector.Resolution);
+        analysis = analyzeHistogram(histogram, timing, detector.Resolution, true);
         updatePlots(histogramPlot, dataPlot, fitPlot, timeAxis_ns, histogram, analysis, timing);
         pause(max(cfg.acquisition.pollPeriod_s - toc(loopTimer), 0));
     end
 
     [timeAxis_ns, histogram] = detector.GetHistogram();
-    analysis = analyzeHistogram(histogram, timing, detector.Resolution);
+    analysis = analyzeHistogram(histogram, timing, detector.Resolution, false);
     updatePlots(histogramPlot, dataPlot, fitPlot, timeAxis_ns, histogram, analysis, timing);
     detector.StopAcquisition();
 
@@ -372,7 +403,11 @@ function results = acquireAndFit(detector, timing, cfg, figures)
     results.fit = analysis.fit;
 end
 
-function analysis = analyzeHistogram(histogram, timing, resolution_ps)
+function analysis = analyzeHistogram(histogram, timing, resolution_ps, allowEmptyReference)
+    if nargin < 4
+        allowEmptyReference = false;
+    end
+
     histogram = double(histogram(:));
     finalBin = min(timing.histogramFinalBin, numel(histogram));
 
@@ -388,7 +423,23 @@ function analysis = analyzeHistogram(histogram, timing, resolution_ps)
     correctedPulseCounts = pulseCounts - backgroundCount;
     referenceCount = correctedPulseCounts(1);
     if referenceCount <= 0
-        error('Reference pulse count is not larger than the dark-count background.');
+        if allowEmptyReference
+            normalizedSignal = nan(size(timing.waitTimes_ns));
+            fit = fitExponentialT1(timing.waitTimes_ns, normalizedSignal);
+
+            analysis.pulseCounts = pulseCounts;
+            analysis.backgroundCount = backgroundCount;
+            analysis.correctedPulseCounts = correctedPulseCounts;
+            analysis.normalizedSignal = normalizedSignal;
+            analysis.fit = fit;
+            return;
+        end
+
+        error(['Reference pulse count is not larger than the dark-count background after the full acquisition. ' ...
+            'First pulse window = %.0f counts, dark window = %.0f counts, corrected reference = %.0f counts. ' ...
+            'This usually means the initialization pulse is missing or too weak, the detector trigger settings are wrong, ' ...
+            'or the photons arrive outside the %.3f ns integration window.'], ...
+            pulseCounts(1), backgroundCount, referenceCount, timing.integrationWindow_ns);
     end
 
     normalizedSignal = correctedPulseCounts(2:end) ./ referenceCount;
@@ -469,11 +520,65 @@ function updatePlots(histogramPlot, dataPlot, fitPlot, timeAxis_ns, histogram, a
     set(fitPlot, 'XData', analysis.fit.curveX_ns, 'YData', analysis.fit.curveY);
 
     figure(ancestor(histogramPlot, 'figure'));
-    title(sprintf('PicoHarp Histogram, background = %.0f counts', analysis.backgroundCount));
+    title(sprintf('Histogram, background = %.0f counts', analysis.backgroundCount));
 
     figure(ancestor(dataPlot, 'figure'));
     title(sprintf('T1 = %.3f ns', analysis.fit.T1_ns));
     drawnow;
+end
+
+function plotCreatedWaveforms(figHandle, initWaveform, triggerWaveform, timing, awg, cfg)
+    figure(figHandle);
+    clf(figHandle);
+
+    totalSamples = max(numel(initWaveform), numel(triggerWaveform));
+    timeAxis_ns = (0:totalSamples - 1) * awg.AWGStep;
+
+    initWaveform = padWaveformForPlot(initWaveform, totalSamples);
+    triggerWaveform = padWaveformForPlot(triggerWaveform, totalSamples);
+
+    initAmplitude_Vpp = awg.MaxAmpForInitialization;
+    initOffset_V = initAmplitude_Vpp / 2;
+    initOutput_V = initOffset_V + 0.5 * initAmplitude_Vpp * initWaveform;
+
+    triggerAmplitude_Vpp = cfg.awg.triggerHighVoltage_V - cfg.awg.triggerLowVoltage_V;
+    triggerOffset_V = (cfg.awg.triggerHighVoltage_V + cfg.awg.triggerLowVoltage_V) / 2;
+    triggerOutput_V = triggerOffset_V + 0.5 * triggerAmplitude_Vpp * triggerWaveform;
+
+    ax1 = subplot(2, 1, 1, 'Parent', figHandle);
+    stairs(ax1, timeAxis_ns, initOutput_V, 'b-', 'LineWidth', 1.2);
+    hold(ax1, 'on');
+    xline(ax1, timing.pulseStartTimes_ns(1), '--k', 'First init pulse');
+    ylabel(ax1, 'Init (V)');
+    title(ax1, 'Uploaded AWG waveforms');
+    grid(ax1, 'on');
+    xlim(ax1, [0, timing.sequenceDuration_ns]);
+
+    ax2 = subplot(2, 1, 2, 'Parent', figHandle);
+    stairs(ax2, timeAxis_ns, triggerOutput_V, 'r-', 'LineWidth', 1.2);
+    hold(ax2, 'on');
+    xline(ax2, timing.pulseStartTimes_ns(1), '--k', 'Trigger start');
+    xlabel(ax2, 'Time (ns)');
+    ylabel(ax2, 'Trigger (V)');
+    grid(ax2, 'on');
+    xlim(ax2, [0, timing.sequenceDuration_ns]);
+
+    linkaxes([ax1, ax2], 'x');
+    drawnow;
+end
+
+function waveform = padWaveformForPlot(waveform, targetLength)
+    if numel(waveform) >= targetLength
+        waveform = waveform(1:targetLength);
+        return;
+    end
+
+    if isempty(waveform)
+        waveform = zeros(1, targetLength);
+        return;
+    end
+
+    waveform(end + 1:targetLength) = waveform(end);
 end
 
 function saveMeasurementResults(results, figures, cfg)
