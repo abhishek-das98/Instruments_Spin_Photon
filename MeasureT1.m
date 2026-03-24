@@ -2,6 +2,7 @@
 % Edit the settings in this block, then press Run.
 
 biasVoltage_V = 2.97;              % Edit it to have minimum optical power when RF voltage is 0
+powerSupplyChannel = 2;            % Keysight triple supply channel: 1, 2, or 3
 initializationPulseHeight = 1.00;  % User AWG level for the initialization pulse.
 waitTimes_ns = 5:5:100;            % Free Evolution time Array
 
@@ -13,6 +14,7 @@ timetaggerTriggerHighVoltage_V = 1.0;
 darkCountDuration_ns = 5;
 initializationPulseDuration_ns = 8;
 finalWait_ns = [];  % Leave empty to use 2*max(waitTimes_ns).
+awgUserDelays_ns = [0, 0, 0, 0];  % [Initialization, Trigger, channel 3, channel 4]
 
 acquisitionDevice = 'TimeTagger';  % 'Picoharp' or 'TimeTagger'
 acquisitionTime_s = 30;
@@ -32,7 +34,7 @@ cfg.waveform.finalWait_ns = finalWait_ns;
 
 cfg.awg.channelInitialization = 1;
 cfg.awg.channelTrigger = 2;
-cfg.awg.userDelays_ns = [0, 0, 0, 0];
+cfg.awg.userDelays_ns = awgUserDelays_ns;
 cfg.awg.initOnUserLevel = initializationPulseHeight;
 cfg.awg.initOffUserLevel = 0.5;  % Internal AWG level that gives 0 V in your setup.
 cfg.awg.settleTime_s = 0.5;
@@ -59,7 +61,7 @@ cfg.timetagger.photonLevel_V = 0.05;
 
 cfg.supply.biasVoltage_V = biasVoltage_V;
 cfg.supply.currentLimit_A = 0.01;
-cfg.supply.channel = 2;
+cfg.supply.channel = powerSupplyChannel;
 cfg.supply.settleTime_s = 0.25;
 
 cfg.analysis.integrationWindow_ns = initializationPulseDuration_ns;
@@ -155,6 +157,10 @@ function cfg = validateConfig(cfg)
 
     if cfg.awg.initOnUserLevel <= cfg.awg.initOffUserLevel
         error('initializationPulseHeight must be larger than the internal off level of 0.5.');
+    end
+
+    if ~ismember(cfg.supply.channel, [1, 2, 3])
+        error('powerSupplyChannel must be 1, 2, or 3.');
     end
 
     validDevices = {'Picoharp', 'TimeTagger'};
